@@ -1,6 +1,6 @@
 declare module "@getpaseo/plugin/server" {
   import type { PaseoApi } from "@getpaseo/client";
-  import type { ZodType, input as ZodInput, output as ZodOutput } from "zod";
+  import type { ZodType } from "zod";
 
   export interface PluginRpcContract<
     InputSchema extends ZodType = ZodType,
@@ -140,8 +140,20 @@ declare module "@getpaseo/plugin" {
   }
 
   export type PluginWorkspacePanelContribution =
-    | { id: string; title: string; icon: string; context: "workspace"; Component: ComponentType<PluginWorkspacePanelProps> }
-    | { id: string; title: string; icon: string; context: "agent"; Component: ComponentType<PluginAgentPanelProps> };
+    | {
+        id: string;
+        title: string;
+        icon: string;
+        context: "workspace";
+        Component: ComponentType<PluginWorkspacePanelProps>;
+      }
+    | {
+        id: string;
+        title: string;
+        icon: string;
+        context: "agent";
+        Component: ComponentType<PluginAgentPanelProps>;
+      };
 
   export interface PluginSidebarContribution {
     id: string;
@@ -200,9 +212,30 @@ declare module "@getpaseo/plugin" {
   }
 
   export type PluginCommandCenterItemContribution =
-    | { id: string; title: string; icon: string; keywords?: readonly string[]; context: "global"; onSelect(context: PluginGlobalCommandContext): void | Promise<void> }
-    | { id: string; title: string; icon: string; keywords?: readonly string[]; context: "workspace"; onSelect(context: PluginWorkspaceCommandContext): void | Promise<void> }
-    | { id: string; title: string; icon: string; keywords?: readonly string[]; context: "agent"; onSelect(context: PluginAgentCommandContext): void | Promise<void> };
+    | {
+        id: string;
+        title: string;
+        icon: string;
+        keywords?: readonly string[];
+        context: "global";
+        onSelect(context: PluginGlobalCommandContext): void | Promise<void>;
+      }
+    | {
+        id: string;
+        title: string;
+        icon: string;
+        keywords?: readonly string[];
+        context: "workspace";
+        onSelect(context: PluginWorkspaceCommandContext): void | Promise<void>;
+      }
+    | {
+        id: string;
+        title: string;
+        icon: string;
+        keywords?: readonly string[];
+        context: "agent";
+        onSelect(context: PluginAgentCommandContext): void | Promise<void>;
+      };
 
   export interface PluginContext {
     handle<InputSchema extends ZodType, OutputSchema extends ZodType>(
