@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { readdir, readFile, stat, unlink, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { PromptSummary, PromptTemplate } from "./contract";
+import type { PromptSummary, PromptTemplate } from "./shared";
 
 const storageDirectory = join(
   process.env.PASEO_HOME ?? join(homedir(), ".paseo"),
