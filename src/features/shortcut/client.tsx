@@ -8,7 +8,12 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Button, Toast, type ToastVariant } from "../../components";
-import { getCurrentBranch, getShortcutBinding, saveShortcutBinding } from "./shared";
+import {
+  DEFAULT_MR_URL,
+  getCurrentBranch,
+  getShortcutBinding,
+  saveShortcutBinding,
+} from "./shared";
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "操作失败，请稍后重试";
@@ -31,9 +36,13 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
   const persistShortcutBinding = useRpc(saveShortcutBinding);
   const [gitBranch, setGitBranch] = useState("");
   const [draftBranch, setDraftBranch] = useState("");
+  const [mrUrl, setMrUrl] = useState(DEFAULT_MR_URL);
+  const [draftMrUrl, setDraftMrUrl] = useState(DEFAULT_MR_URL);
   const [editingBranch, setEditingBranch] = useState(false);
+  const [editingMrUrl, setEditingMrUrl] = useState(false);
   const [branchLoading, setBranchLoading] = useState(true);
   const [savingBranch, setSavingBranch] = useState(false);
+  const [savingMrUrl, setSavingMrUrl] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
   const [creatingPushAgent, setCreatingPushAgent] = useState(false);
   const [toast, setToast] = useState<{ message: string; variant: ToastVariant } | null>(null);
@@ -53,11 +62,16 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
     setBranchLoading(true);
     setBranchError(null);
     setEditingBranch(false);
+    setEditingMrUrl(false);
 
     async function loadBranch() {
       try {
         const stored = await loadShortcutBinding({ agentId });
         if (!active) return;
+
+        const loadedMrUrl = stored.mrUrl ?? DEFAULT_MR_URL;
+        setMrUrl(loadedMrUrl);
+        setDraftMrUrl(loadedMrUrl);
 
         if (stored.branch) {
           setGitBranch(stored.branch);
@@ -105,14 +119,59 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
     setSavingBranch(true);
     setBranchError(null);
     try {
-      const saved = await persistShortcutBinding({ agentId, branch: normalizedBranch });
+      const saved = await persistShortcutBinding({
+        agentId,
+        branch: normalizedBranch,
+        mrUrl: mrUrl.trim() || DEFAULT_MR_URL,
+      });
       setGitBranch(saved.branch);
       setDraftBranch(saved.branch);
+      setMrUrl(saved.mrUrl);
+      setDraftMrUrl(saved.mrUrl);
       setEditingBranch(false);
     } catch (cause) {
       setBranchError(errorMessage(cause));
     } finally {
       setSavingBranch(false);
+    }
+  }
+
+  function handleStartEditingMrUrl() {
+    if (branchLoading || savingMrUrl) return;
+    setDraftMrUrl(mrUrl);
+    setBranchError(null);
+    setEditingMrUrl(true);
+  }
+
+  function handleCancelEditingMrUrl() {
+    if (savingMrUrl) return;
+    setDraftMrUrl(mrUrl);
+    setBranchError(null);
+    setEditingMrUrl(false);
+  }
+
+  async function handleSaveMrUrl() {
+    const normalizedBranch = gitBranch.trim();
+    const normalizedMrUrl = draftMrUrl.trim();
+    if (!normalizedBranch || !normalizedMrUrl || savingMrUrl) return;
+
+    setSavingMrUrl(true);
+    setBranchError(null);
+    try {
+      const saved = await persistShortcutBinding({
+        agentId,
+        branch: normalizedBranch,
+        mrUrl: normalizedMrUrl,
+      });
+      setGitBranch(saved.branch);
+      setDraftBranch(saved.branch);
+      setMrUrl(saved.mrUrl);
+      setDraftMrUrl(saved.mrUrl);
+      setEditingMrUrl(false);
+    } catch (cause) {
+      setBranchError(errorMessage(cause));
+    } finally {
+      setSavingMrUrl(false);
     }
   }
 
@@ -246,6 +305,66 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
           workspaceId：{workspaceId}
         </Text>
       </View>
+      {editingMrUrl ? (
+        <View style={styles.infoRow}>
+          <Text style={styles.fieldLabel}>MR 链接：</Text>
+          <TextInput
+            accessibilityLabel="当前 Agent 绑定的 MR 链接"
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoFocus
+            keyboardType="url"
+            onChangeText={setDraftMrUrl}
+            placeholder="请输入 MR 链接"
+            placeholderTextColor={theme.colors.foregroundMuted}
+            style={styles.branchInput}
+            value={draftMrUrl}
+          />
+          <Pressable
+            accessibilityLabel="保存 MR 链接"
+            accessibilityRole="button"
+            disabled={!draftMrUrl.trim() || !gitBranch.trim() || savingMrUrl}
+            onPress={() => void handleSaveMrUrl()}
+            style={({ pressed }) => [
+              styles.iconButton,
+              pressed && styles.pressed,
+              (!draftMrUrl.trim() || !gitBranch.trim() || savingMrUrl) && styles.disabled,
+            ]}
+          >
+            <Text accessible={false} style={[styles.iconGlyph, styles.saveGlyph]}>
+              ✓
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel="取消编辑 MR 链接"
+            accessibilityRole="button"
+            disabled={savingMrUrl}
+            onPress={handleCancelEditingMrUrl}
+            style={({ pressed }) => [
+              styles.iconButton,
+              pressed && styles.pressed,
+              savingMrUrl && styles.disabled,
+            ]}
+          >
+            <Text accessible={false} style={[styles.iconGlyph, styles.cancelGlyph]}>
+              ×
+            </Text>
+          </Pressable>
+        </View>
+      ) : (
+        <Pressable
+          accessibilityLabel="编辑当前 Agent 绑定的 MR 链接"
+          accessibilityRole="button"
+          disabled={branchLoading}
+          onPress={handleStartEditingMrUrl}
+          style={({ pressed }) => [styles.infoRow, pressed && styles.pressed]}
+        >
+          <Text style={styles.fieldLabel}>MR 链接：</Text>
+          <Text numberOfLines={1} style={styles.infoText}>
+            {branchLoading ? "读取中…" : mrUrl}
+          </Text>
+        </Pressable>
+      )}
       {editingBranch ? (
         <View style={styles.infoRow}>
           <Text style={styles.fieldLabel}>git branch：</Text>

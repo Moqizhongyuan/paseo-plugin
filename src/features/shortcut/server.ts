@@ -18,7 +18,12 @@ const storageDirectory = join(
 );
 const storageFile = join(storageDirectory, "shortcut-bindings.json");
 
-type ShortcutBindings = Record<string, string>;
+interface ShortcutBinding {
+  branch?: string;
+  mrUrl?: string;
+}
+
+type ShortcutBindings = Record<string, ShortcutBinding>;
 type GetShortcutBindingInput = z.infer<typeof getShortcutBindingContract.input>;
 type SaveShortcutBindingInput = z.infer<typeof saveShortcutBindingContract.input>;
 type GetCurrentBranchInput = z.infer<typeof getCurrentBranchContract.input>;
@@ -27,17 +32,35 @@ function isMissingFile(error: unknown) {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
+function normalizeBinding(value: unknown): ShortcutBinding | null {
+  if (typeof value === "string") {
+    const branch = value.trim();
+    return branch ? { branch } : null;
+  }
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const record = value as Record<string, unknown>;
+  const branch =
+    typeof record.branch === "string" && record.branch.trim() ? record.branch.trim() : undefined;
+  const mrUrl =
+    typeof record.mrUrl === "string" && record.mrUrl.trim() ? record.mrUrl.trim() : undefined;
+
+  return branch || mrUrl ? { branch, mrUrl } : null;
+}
+
 async function readBindings(): Promise<ShortcutBindings> {
   try {
     const raw = await readFile(storageFile, "utf8");
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
 
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-        ([key, value]) => key.length > 0 && typeof value === "string" && value.trim().length > 0,
-      ),
-    );
+    const bindings: ShortcutBindings = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const binding = key.trim() ? normalizeBinding(value) : null;
+      if (binding) bindings[key] = binding;
+    }
+    return bindings;
   } catch (error) {
     if (isMissingFile(error)) return {};
     throw error;
@@ -51,15 +74,17 @@ async function writeBindings(bindings: ShortcutBindings) {
 
 export async function getShortcutBinding({ agentId }: GetShortcutBindingInput) {
   const bindings = await readBindings();
-  return { branch: bindings[agentId] ?? null };
+  const binding = bindings[agentId];
+  return { branch: binding?.branch ?? null, mrUrl: binding?.mrUrl ?? null };
 }
 
-export async function saveShortcutBinding({ agentId, branch }: SaveShortcutBindingInput) {
+export async function saveShortcutBinding({ agentId, branch, mrUrl }: SaveShortcutBindingInput) {
   const bindings = await readBindings();
   const normalizedBranch = branch.trim();
-  bindings[agentId] = normalizedBranch;
+  const normalizedMrUrl = mrUrl.trim();
+  bindings[agentId] = { branch: normalizedBranch, mrUrl: normalizedMrUrl };
   await writeBindings(bindings);
-  return { branch: normalizedBranch };
+  return { branch: normalizedBranch, mrUrl: normalizedMrUrl };
 }
 
 export async function getCurrentBranchHandler({ directory }: GetCurrentBranchInput) {
