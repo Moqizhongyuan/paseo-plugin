@@ -1,6 +1,13 @@
-import { type PluginAgentPanelProps, useRpc, useWorkspace } from "@getpaseo/plugin";
+import {
+  type PluginAgentPanelProps,
+  useAgent,
+  usePaseo,
+  useRpc,
+  useWorkspace,
+} from "@getpaseo/plugin";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Button, Toast, type ToastVariant } from "../../components";
 import { getCurrentBranch, getShortcutBinding, saveShortcutBinding } from "./shared";
 
 function errorMessage(error: unknown) {
@@ -8,7 +15,17 @@ function errorMessage(error: unknown) {
 }
 
 export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAgentPanelProps) {
+  const paseo = usePaseo();
   const workspaceDirectory = useWorkspace(workspaceId, ({ directory }) => directory);
+  const currentAgentConfig = useAgent(
+    agentId,
+    ({ provider, model, currentModeId, thinkingOptionId }) => ({
+      provider,
+      model,
+      currentModeId,
+      thinkingOptionId,
+    }),
+  );
   const loadShortcutBinding = useRpc(getShortcutBinding);
   const loadCurrentBranch = useRpc(getCurrentBranch);
   const persistShortcutBinding = useRpc(saveShortcutBinding);
@@ -18,6 +35,8 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
   const [branchLoading, setBranchLoading] = useState(true);
   const [savingBranch, setSavingBranch] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
+  const [creatingPushAgent, setCreatingPushAgent] = useState(false);
+  const [toast, setToast] = useState<{ message: string; variant: ToastVariant } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -97,6 +116,41 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
     }
   }
 
+  async function handleCreatePushAgent() {
+    const targetBranch = gitBranch.trim();
+    if (!targetBranch || !currentAgentConfig || creatingPushAgent) return;
+
+    setCreatingPushAgent(true);
+    setToast(null);
+    try {
+      const provider = currentAgentConfig.model
+        ? `${currentAgentConfig.provider}/${currentAgentConfig.model}`
+        : currentAgentConfig.provider;
+
+      await paseo.workspaces.ref(workspaceId).agents.create({
+        config: {
+          provider,
+          ...(currentAgentConfig.currentModeId ? { modeId: currentAgentConfig.currentModeId } : {}),
+          ...(currentAgentConfig.thinkingOptionId
+            ? { thinkingOptionId: currentAgentConfig.thinkingOptionId }
+            : {}),
+        },
+        title: "提交并推送代码",
+        prompt: `请在当前 Workspace 中完成以下任务：
+1. 检查当前 Git 状态、当前分支和远端配置。
+2. 将当前工作区中需要提交的代码整理为一个合适的 commit，提交信息根据实际改动生成。
+3. 将该 commit 推送到远端目标分支 ${JSON.stringify(targetBranch)}。
+4. 不要丢弃或覆盖现有改动；如果无法安全完成，请停止并说明原因。`,
+      });
+
+      setToast({ message: `已创建推送 Agent，目标分支：${targetBranch}`, variant: "success" });
+    } catch (cause) {
+      setToast({ message: errorMessage(cause), variant: "error" });
+    } finally {
+      setCreatingPushAgent(false);
+    }
+  }
+
   const styles = useMemo(
     () =>
       StyleSheet.create({
@@ -170,6 +224,9 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
           marginTop: 4,
           color: theme.colors.statusDanger,
           fontSize: 12,
+        },
+        commandButton: {
+          marginTop: 4,
         },
       }),
     [layout.compact, theme],
@@ -250,6 +307,24 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
       )}
       {branchError ? <Text style={styles.error}>{branchError}</Text> : null}
       <Text style={styles.subTitle}>指令</Text>
+      <Button
+        accessibilityLabel="创建 Agent 提交并推送当前代码"
+        disabled={branchLoading || !gitBranch.trim() || !currentAgentConfig}
+        label="提交并推送当前代码"
+        loading={creatingPushAgent}
+        loadingLabel="正在创建 Agent…"
+        onPress={() => void handleCreatePushAgent()}
+        style={styles.commandButton}
+        theme={theme}
+      />
+      <Toast
+        compact={layout.compact}
+        message={toast?.message ?? ""}
+        onDismiss={() => setToast(null)}
+        theme={theme}
+        variant={toast?.variant ?? "success"}
+        visible={toast !== null}
+      />
     </View>
   );
 }
