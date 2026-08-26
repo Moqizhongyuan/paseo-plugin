@@ -11,7 +11,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { Button, Card, List, Modal, Searchbar } from "../../components";
+import { Button, Card, List, Modal, Searchbar, Toast, type ToastVariant } from "../../components";
 import {
   createPromptTemplate,
   deletePromptTemplate,
@@ -68,13 +68,17 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<PromptSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; variant: ToastVariant } | null>(null);
   const detailProgress = useRef(new Animated.Value(0)).current;
+
+  const dismissToast = useCallback(() => setToast(null), []);
+  const showToast = useCallback((message: string, variant: ToastVariant = "success") => {
+    setToast({ message, variant });
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    dismissToast();
     try {
       const result = await listTemplates({});
       setItems(result.items);
@@ -82,11 +86,11 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
         return currentId && result.items.some((item) => item.id === currentId) ? currentId : null;
       });
     } catch (cause) {
-      setError(errorMessage(cause));
+      showToast(errorMessage(cause), "error");
     } finally {
       setLoading(false);
     }
-  }, [listTemplates]);
+  }, [dismissToast, listTemplates, showToast]);
 
   useEffect(() => {
     void refresh();
@@ -106,7 +110,7 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
     }
 
     setDetailLoading(true);
-    setError(null);
+    dismissToast();
     void loadTemplate({ id: selectedId })
       .then((template) => {
         if (!active) return;
@@ -115,7 +119,7 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
         setDraftContent(template.content);
       })
       .catch((cause: unknown) => {
-        if (active) setError(errorMessage(cause));
+        if (active) showToast(errorMessage(cause), "error");
       })
       .finally(() => {
         if (active) setDetailLoading(false);
@@ -124,7 +128,7 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
     return () => {
       active = false;
     };
-  }, [loadTemplate, selectedId]);
+  }, [dismissToast, loadTemplate, selectedId, showToast]);
 
   useEffect(() => {
     if (!selectedId || detailWidth <= 0) {
@@ -145,10 +149,10 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
       setSelectedId(null);
       setDetailClosing(false);
       setSelected(null);
-      setError(null);
+      dismissToast();
     });
     return () => animation.stop();
-  }, [detailClosing, detailProgress, detailWidth, selectedId]);
+  }, [detailClosing, detailProgress, detailWidth, dismissToast, selectedId]);
 
   const visibleItems = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -163,18 +167,18 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
       StyleSheet.create({
         screen: {
           flex: 1,
-          padding: layout.compact ? 12 : 20,
+          padding: layout.compact ? 10 : 16,
           backgroundColor: theme.colors.surface0,
         },
         glyph: {
           color: theme.colors.foregroundMuted,
-          fontSize: 20,
-          lineHeight: 22,
+          fontSize: 18,
+          lineHeight: 20,
         },
         actionGlyph: {
           color: theme.colors.foregroundMuted,
-          fontSize: 18,
-          lineHeight: 20,
+          fontSize: 16,
+          lineHeight: 18,
         },
         deleteGlyph: {
           color: theme.colors.statusDanger,
@@ -185,14 +189,17 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
         },
         listHeader: {
           paddingHorizontal: 12,
-          paddingVertical: 10,
+          paddingTop: 12,
+          paddingBottom: 9,
           color: theme.colors.foregroundMuted,
           fontSize: 12,
+          fontWeight: "600",
+          lineHeight: 18,
         },
         newButton: {
           alignSelf: "stretch",
-          minHeight: 44,
-          paddingHorizontal: 12,
+          minHeight: 42,
+          paddingHorizontal: 14,
           justifyContent: "flex-start",
           borderWidth: 0,
           borderTopWidth: 1,
@@ -212,7 +219,7 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
           minHeight: 0,
           position: "relative",
           overflow: "hidden",
-          gap: 12,
+          gap: 10,
         },
         listLayer: {
           flex: 1,
@@ -236,49 +243,54 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
         detailPane: {
           flex: 1,
           minHeight: 0,
-          gap: 12,
-          padding: 14,
+          gap: layout.compact ? 10 : 12,
+          padding: layout.compact ? 12 : 16,
         },
         detailHeader: {
           flexDirection: "row",
           alignItems: "center",
           gap: 8,
+          minHeight: 32,
         },
         backButton: {
           minWidth: 32,
           minHeight: 32,
           alignItems: "center",
           justifyContent: "center",
-          borderRadius: 6,
+          borderRadius: 8,
         },
         backGlyph: {
           color: theme.colors.foregroundMuted,
-          fontSize: 24,
-          lineHeight: 26,
+          fontSize: 22,
+          lineHeight: 24,
         },
         detailHeading: {
           color: theme.colors.foreground,
-          fontSize: layout.compact ? 16 : 18,
+          fontSize: layout.compact ? 16 : 17,
           fontWeight: "600",
         },
         titleInput: {
-          minHeight: 42,
-          paddingHorizontal: 10,
-          paddingVertical: 8,
+          minHeight: 40,
+          paddingHorizontal: 12,
+          paddingVertical: 7,
           color: theme.colors.foreground,
+          fontSize: 14,
+          lineHeight: 20,
           borderColor: theme.colors.foregroundMuted,
           borderWidth: 1,
-          borderRadius: 6,
+          borderRadius: 8,
         },
         contentInput: {
           flex: 1,
           minHeight: 180,
-          padding: 10,
+          padding: 12,
           color: theme.colors.foreground,
+          fontSize: 14,
+          lineHeight: 20,
           textAlignVertical: "top",
           borderWidth: 1,
           borderColor: theme.colors.foregroundMuted,
-          borderRadius: 6,
+          borderRadius: 8,
         },
         detailEmpty: {
           flex: 1,
@@ -291,28 +303,21 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "flex-end",
-          gap: 10,
+          gap: 8,
+          paddingTop: 2,
         },
         saveButton: {
-          minHeight: 38,
-          paddingHorizontal: 16,
-          alignItems: "center",
-          justifyContent: "center",
-          backgroundColor: theme.colors.accent,
-          borderRadius: 6,
+          minHeight: 36,
+          paddingHorizontal: 14,
+          borderRadius: 8,
         },
         saveLabel: {
           color: theme.colors.accentForeground,
           fontWeight: "600",
         },
-        error: {
-          color: theme.colors.statusDanger,
-        },
-        notice: {
-          color: theme.colors.foregroundMuted,
-        },
         deleteMessage: {
           color: theme.colors.foreground,
+          fontSize: 14,
           lineHeight: 22,
         },
       }),
@@ -321,8 +326,7 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
 
   async function handleCreate() {
     setSaving(true);
-    setError(null);
-    setNotice(null);
+    dismissToast();
     try {
       const created = await createTemplate({ title: "", content: "" });
       setItems((current) => sortByUpdatedAt([created, ...current]));
@@ -331,7 +335,7 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
       setDraftTitle(created.title);
       setDraftContent(created.content);
     } catch (cause) {
-      setError(errorMessage(cause));
+      showToast(errorMessage(cause), "error");
     } finally {
       setSaving(false);
     }
@@ -340,8 +344,7 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
   async function handleSave() {
     if (!selectedId) return;
     setSaving(true);
-    setError(null);
-    setNotice(null);
+    dismissToast();
     try {
       const saved = await updateTemplate({
         id: selectedId,
@@ -366,7 +369,7 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
       setDraftTitle(saved.title);
       setDraftContent(saved.content);
     } catch (cause) {
-      setError(errorMessage(cause));
+      showToast(errorMessage(cause), "error");
     } finally {
       setSaving(false);
     }
@@ -374,8 +377,7 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
 
   function handleRequestDelete(item: PromptSummary) {
     setDeleteTarget(item);
-    setError(null);
-    setNotice(null);
+    dismissToast();
   }
 
   function handleCancelDelete() {
@@ -388,29 +390,27 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
     if (!target || deleting) return;
 
     setDeleting(true);
-    setError(null);
-    setNotice(null);
+    dismissToast();
     try {
       await deleteTemplate({ id: target.id });
       setItems((current) => current.filter((item) => item.id !== target.id));
       setDeleteTarget(null);
-      setNotice(`已删除提示词：${target.title || "未命名提示词"}`);
+      showToast(`已删除提示词：${target.title || "未命名提示词"}`);
     } catch (cause) {
-      setError(errorMessage(cause));
+      showToast(errorMessage(cause), "error");
     } finally {
       setDeleting(false);
     }
   }
 
   async function handleCopy(item: PromptSummary) {
-    setError(null);
-    setNotice(null);
+    dismissToast();
     try {
       const template = await loadTemplate({ id: item.id });
       await copyToClipboard(template.content);
-      setNotice(`已复制提示词：${template.title || "未命名提示词"}`);
+      showToast(`已复制提示词：${template.title || "未命名提示词"}`);
     } catch (cause) {
-      setError(errorMessage(cause));
+      showToast(errorMessage(cause), "error");
     }
   }
 
@@ -577,9 +577,16 @@ export function PromptTemplatesPanel({ theme, layout }: PluginWorkspacePanelProp
         {selectedId ? renderDetail() : null}
       </View>
 
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-      {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+      <Toast
+        compact={layout.compact}
+        message={toast?.message ?? ""}
+        onDismiss={dismissToast}
+        theme={theme}
+        variant={toast?.variant ?? "success"}
+        visible={toast !== null}
+      />
       <Modal
+        compact={layout.compact}
         theme={theme}
         visible={deleteTarget !== null}
         title="删除提示词"

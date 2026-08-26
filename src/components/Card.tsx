@@ -15,7 +15,7 @@ export function Card({ theme, style, ...viewProps }: CardProps) {
           backgroundColor: theme.colors.surface0,
           borderWidth: 1,
           borderColor: theme.colors.foregroundMuted,
-          borderRadius: 8,
+          borderRadius: 10,
           overflow: "hidden",
         },
       }),

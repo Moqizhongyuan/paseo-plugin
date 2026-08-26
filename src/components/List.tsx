@@ -53,12 +53,12 @@ export function ListItem({
     () =>
       StyleSheet.create({
         item: {
-          minHeight: 68,
+          minHeight: 60,
           flexDirection: "row",
           alignItems: "center",
           gap: 8,
           paddingHorizontal: 12,
-          paddingVertical: 10,
+          paddingVertical: 8,
           borderBottomWidth: 1,
           borderColor: theme.colors.foregroundMuted,
         },
@@ -81,10 +81,12 @@ export function ListItem({
         title: {
           color: theme.colors.foreground,
           fontWeight: "600",
+          lineHeight: 19,
         },
         description: {
           color: theme.colors.foregroundMuted,
           fontSize: 12,
+          lineHeight: 17,
         },
         actions: {
           flexDirection: "row",
