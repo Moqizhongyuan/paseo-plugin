@@ -27,7 +27,7 @@ const REVIEW_MANAGER_MODE_ID = "full-access";
 const REVIEW_CHILD_PROVIDER = "claude-super-relay/claude-opus-4-8[1m]";
 const REVIEW_CHILD_MODE_ID = "plan";
 const REVIEW_CHILD_THINKING_OPTION_ID = "max";
-const REVIEW_CHILD_FEATURE_VALUES = { fast_mode: true } as const;
+const REVIEW_CHILD_FEATURES = { fast_mode: true } as const;
 const REVIEW_CHILD_MAX_RETRIES = 3;
 
 // 构造 GPT 管理 Agent 的 initial prompt：插件只提供 MR URL、绑定分支、workspaceId 和整个管理流程，
@@ -52,7 +52,7 @@ function buildReviewManagerPrompt(
 - 使用 Paseo skill / MCP（create_agent 等）在目标 Workspace ${JSON.stringify(reviewWorkspaceId)} 中创建两个 Claude 子 Agent；不要绑定发起本次评审的快捷面板 Agent，也不要把它当作 parent。
 - provider/model 必须固定为当前 Claude Seed 内测的完整 ID：${JSON.stringify(REVIEW_CHILD_PROVIDER)}；不要使用旧 profile 中的 ${JSON.stringify("model_api/experimental_0630")}、模糊的 provider 名称 ${JSON.stringify("claude")}，也不要自行改用未经实时确认的其他模型。
 - 创建前必须通过 Paseo 的 provider/model 查询确认 ${JSON.stringify(REVIEW_CHILD_PROVIDER)} 仍出现在实时模型列表中。若没有出现在列表中，先刷新并重新查询一次；仍不可用时记录真实 blocker，不要用过期 profile 猜测或冒充成功。
-- 两个子 Agent 都使用 ${JSON.stringify(REVIEW_CHILD_MODE_ID)} / 只读模式、thinking option ${JSON.stringify(REVIEW_CHILD_THINKING_OPTION_ID)}，并在 create_agent 的 config 中传入 featureValues: ${JSON.stringify(REVIEW_CHILD_FEATURE_VALUES)} 开启 fast mode；位于同一个 Workspace，使用清晰的标题和 labels（例如 role=primary-review / role=verification-review）。不要把 featureValues 写成 features。
+- 两个子 Agent 都使用 ${JSON.stringify(REVIEW_CHILD_MODE_ID)} / 只读模式、thinking option ${JSON.stringify(REVIEW_CHILD_THINKING_OPTION_ID)}，并在 Paseo MCP create_agent 的 settings 中传入 features: ${JSON.stringify(REVIEW_CHILD_FEATURES)} 开启 fast mode；位于同一个 Workspace，使用清晰的标题和 labels（例如 role=primary-review / role=verification-review）。这里是 MCP 调用，必须使用 settings: { modeId, thinkingOptionId, features }；不要传 config，也不要传顶层 featureValues。
 - 每个子任务都必须写清：目标、允许范围、禁止范围、背景、完成标准、验证命令、失败/回滚边界，以及固定的结构化汇报格式。必要时先建立或指定一个 chat room 做协作与结果收集。
 
 Claude 子 Agent 1（主评审）：
@@ -66,13 +66,19 @@ Claude 子 Agent 2（复核）：
 - 同样只读，禁止修改文件、git add/commit/push、改写历史或发布 MR 评论。
 - 你可以先等待 Agent 1 完成，再把它的状态与报告原文发送给 Agent 2；即使 Agent 1 失败、超时或没有产出文本，也要把该状态转交给 Agent 2，并要求 Agent 2 完整、独立地评审。
 
-三、服务端临时错误的有限重试（两个子 Agent 分别处理）：
-- 创建或运行子 Agent 时，HTTP 429、5xx（尤其是 503 No available accounts）、网关暂时不可用、timeout、connection reset、stream disconnected 等属于可重试的临时服务端错误。第一次遇到这类错误时，不要立即把该 Agent 判定为最终失败。
-- 每个子 Agent 最多重试 ${REVIEW_CHILD_MAX_RETRIES} 次（首次尝试之外的重试次数）。建议使用递增等待，例如 15 秒、30 秒、60 秒；每次重试前重新读取 Agent 状态和最近活动，确认没有已经成功完成的请求。
-- 如果 create_agent 返回错误，先通过 Paseo 查询目标 Workspace 中是否已经创建了对应 Agent；只有确认没有创建成功时才重新创建，避免重复创建和重复消耗账号配额。若 Agent 已存在，优先复用原 Agent 并发送重试指令，不要为同一次评审无限制地新建 tab。
-- 两个 Agent 的重试相互独立。主评审成功后仍要等待复核 Agent 完成；主评审失败、超时或所有重试耗尽时，仍把完整状态和每次错误原文传给复核 Agent，要求复核 Agent 独立完成评审。
+两个 Claude 评审 Agent 的子 Agent 权限与重试边界：
+- 必须把本段授权和边界写进两个 Claude 评审 Agent 的 initialPrompt。两个评审 Agent 都可以按需使用 Paseo skill / MCP create_agent 创建自己的 Claude 子 Agent，用于只读检索、分片审查或验证；不得使用其它 spawn / Task / Explore 委托机制。
+- 评审 Agent 创建的子 Agent 必须继承相同的只读红线，使用目标 Workspace，并在创建后核对 parent、Workspace、provider/model 和模式。若一次创建两个及以上子 Agent，先按 Paseo 规则建立或指定 chat room 并划清任务与共享资源边界。
+- 每个 Claude 评审 Agent 自行管理它所创建子 Agent 的等待、结果收集和有限重试。重试次数、等待间隔和是否改为自身继续审查，可以由该评审 Agent 根据实际错误独立决定，不需要与 GPT 管理 Agent 对两个评审 Agent 的外层重试机制保持一致，也不需要与另一个 Claude 评审 Agent 保持一致；但禁止无限重试。
+- 某个子 Agent 失败不等于所属 Claude 评审 Agent 失败。评审 Agent 应优先复用已完成的自身取证、必要时自行补齐缺口，并在最终报告中说明子 Agent 失败及未覆盖范围。只有评审 Agent 自身最终没有产出报告或进入失败终态，GPT 管理 Agent 才使用下面的外层重试机制。
+
+三、两个 Claude 评审 Agent 的外层有限重试（由 GPT 管理 Agent 分别处理）：
+- 创建或运行两个 Claude 评审 Agent 时，HTTP 429、5xx（尤其是 503 No available accounts）、网关暂时不可用、timeout、connection reset、stream disconnected 等属于可重试的临时服务端错误。第一次遇到这类错误时，不要立即把对应评审 Agent 判定为最终失败。
+- 每个评审 Agent 最多重试 ${REVIEW_CHILD_MAX_RETRIES} 次（首次尝试之外的重试次数）。建议使用递增等待，例如 15 秒、30 秒、60 秒；每次重试前重新读取评审 Agent 状态和最近活动，确认没有已经成功完成的请求。
+- 如果创建评审 Agent 的 create_agent 返回错误，先通过 Paseo 查询目标 Workspace 中是否已经创建了对应评审 Agent；只有确认没有创建成功时才重新创建，避免重复创建和重复消耗账号配额。若评审 Agent 已存在，优先复用原 Agent 并发送重试指令，不要为同一次评审无限制地新建 tab。
+- 两个评审 Agent 的外层重试相互独立，也不管理它们各自创建的子 Agent 重试。主评审成功后仍要等待复核 Agent 完成；主评审失败、超时或所有外层重试耗尽时，仍把完整状态和每次错误原文传给复核 Agent，要求复核 Agent 独立完成评审。
 - 在所有重试结束前，不要创建最终飞书文档，也不要汇报“评审已完成”。应轮询或等待两个 Agent 到达终态；如果仍处于 running，继续等待，不要因为暂时没有新输出就提前结束。
-- 达到重试上限后仍失败时，才把该 Agent 标记为 blocked/error，并在文档和最终回复中记录尝试次数、每次错误、等待过程和真实终态；不得编造评审结论。若只有一个 Agent 成功，文档仍须明确区分已完成的报告与未完成的部分。
+- 达到外层重试上限后仍失败时，才把对应评审 Agent 标记为 blocked/error，并在文档和最终回复中记录尝试次数、每次错误、等待过程和真实终态；不得编造评审结论。若只有一个评审 Agent 成功，文档仍须明确区分已完成的报告与未完成的部分。
 
 四、创建飞书云文档（结果汇总）：
 - 先读取 lark-doc 与 lark-shared 的使用要求以及创建文档所需的 references。

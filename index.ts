@@ -1,6 +1,7 @@
 import type { PluginContext } from "@getpaseo/plugin";
 import { PromptTemplatesPanel } from "./src/features/prompt-templates/client";
 import { ShortcutPanel } from "./src/features/shortcut/client";
+import { TaskPanel } from "./src/features/task-panel/client";
 import {
   createPromptTemplate,
   deletePromptTemplate,
@@ -48,6 +49,13 @@ export default function contribute(plugin: PluginContext) {
     icon: "Command",
     context: "agent",
     Component: ShortcutPanel,
+  });
+  plugin.addWorkspacePanel({
+    id: "task-panel",
+    title: "任务面板",
+    icon: "ListTodo",
+    context: "agent",
+    Component: TaskPanel,
   });
 
   plugin.addCommandCenterItem({
