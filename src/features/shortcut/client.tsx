@@ -21,9 +21,14 @@ function errorMessage(error: unknown) {
 
 // “评审当前 MR”只创建一个 GPT 管理 Agent，由它负责后续编排两个 Claude 子 Agent 与飞书文档。
 // 管理 Agent 固定使用完整 provider/model，并以 full-access 模式运行（它需要创建子 Agent 与飞书文档，
-// 这些是允许的外部写入）；两个 Claude 子 Agent 的 provider/模式由管理 Agent 自行选择。
+// 这些是允许的外部写入）；两个 Claude 子 Agent 使用下方固定的实时可用 provider/model 与只读模式。
 const REVIEW_MANAGER_PROVIDER = "codex/gpt-5.6-sol";
 const REVIEW_MANAGER_MODE_ID = "full-access";
+const REVIEW_CHILD_PROVIDER = "claude-super-relay/claude-opus-4-8[1m]";
+const REVIEW_CHILD_MODE_ID = "plan";
+const REVIEW_CHILD_THINKING_OPTION_ID = "max";
+const REVIEW_CHILD_FEATURE_VALUES = { fast_mode: true } as const;
+const REVIEW_CHILD_MAX_RETRIES = 3;
 
 // 构造 GPT 管理 Agent 的 initial prompt：插件只提供 MR URL、绑定分支、workspaceId 和整个管理流程，
 // 真正的 MR 取证、创建两个 Claude 子 Agent、收集结果、创建飞书文档都由这个管理 Agent 异步负责。
@@ -45,8 +50,9 @@ function buildReviewManagerPrompt(
 
 二、创建两个 Claude 子 Agent（遵循 Paseo 多 Agent 规则）：
 - 使用 Paseo skill / MCP（create_agent 等）在目标 Workspace ${JSON.stringify(reviewWorkspaceId)} 中创建两个 Claude 子 Agent；不要绑定发起本次评审的快捷面板 Agent，也不要把它当作 parent。
-- provider/model 选择：按当前 ~/.paseo/orchestration-preferences.json 和 provider 实际可用状态选择 Claude provider/model，优先使用受管的 claude-super-relay 完整 provider/model（例如 claude-super-relay/claude-opus-4-8[1m]）；不要假设内置 claude/claude-opus-5 有可用凭据。
-- 两个子 Agent 都使用 plan / 只读模式、同一个 Workspace、清晰的标题和 labels（例如 role=primary-review / role=verification-review）。
+- provider/model 必须固定为当前 Claude Seed 内测的完整 ID：${JSON.stringify(REVIEW_CHILD_PROVIDER)}；不要使用旧 profile 中的 ${JSON.stringify("model_api/experimental_0630")}、模糊的 provider 名称 ${JSON.stringify("claude")}，也不要自行改用未经实时确认的其他模型。
+- 创建前必须通过 Paseo 的 provider/model 查询确认 ${JSON.stringify(REVIEW_CHILD_PROVIDER)} 仍出现在实时模型列表中。若没有出现在列表中，先刷新并重新查询一次；仍不可用时记录真实 blocker，不要用过期 profile 猜测或冒充成功。
+- 两个子 Agent 都使用 ${JSON.stringify(REVIEW_CHILD_MODE_ID)} / 只读模式、thinking option ${JSON.stringify(REVIEW_CHILD_THINKING_OPTION_ID)}，并在 create_agent 的 config 中传入 featureValues: ${JSON.stringify(REVIEW_CHILD_FEATURE_VALUES)} 开启 fast mode；位于同一个 Workspace，使用清晰的标题和 labels（例如 role=primary-review / role=verification-review）。不要把 featureValues 写成 features。
 - 每个子任务都必须写清：目标、允许范围、禁止范围、背景、完成标准、验证命令、失败/回滚边界，以及固定的结构化汇报格式。必要时先建立或指定一个 chat room 做协作与结果收集。
 
 Claude 子 Agent 1（主评审）：
@@ -60,15 +66,23 @@ Claude 子 Agent 2（复核）：
 - 同样只读，禁止修改文件、git add/commit/push、改写历史或发布 MR 评论。
 - 你可以先等待 Agent 1 完成，再把它的状态与报告原文发送给 Agent 2；即使 Agent 1 失败、超时或没有产出文本，也要把该状态转交给 Agent 2，并要求 Agent 2 完整、独立地评审。
 
-三、创建飞书云文档（结果汇总）：
+三、服务端临时错误的有限重试（两个子 Agent 分别处理）：
+- 创建或运行子 Agent 时，HTTP 429、5xx（尤其是 503 No available accounts）、网关暂时不可用、timeout、connection reset、stream disconnected 等属于可重试的临时服务端错误。第一次遇到这类错误时，不要立即把该 Agent 判定为最终失败。
+- 每个子 Agent 最多重试 ${REVIEW_CHILD_MAX_RETRIES} 次（首次尝试之外的重试次数）。建议使用递增等待，例如 15 秒、30 秒、60 秒；每次重试前重新读取 Agent 状态和最近活动，确认没有已经成功完成的请求。
+- 如果 create_agent 返回错误，先通过 Paseo 查询目标 Workspace 中是否已经创建了对应 Agent；只有确认没有创建成功时才重新创建，避免重复创建和重复消耗账号配额。若 Agent 已存在，优先复用原 Agent 并发送重试指令，不要为同一次评审无限制地新建 tab。
+- 两个 Agent 的重试相互独立。主评审成功后仍要等待复核 Agent 完成；主评审失败、超时或所有重试耗尽时，仍把完整状态和每次错误原文传给复核 Agent，要求复核 Agent 独立完成评审。
+- 在所有重试结束前，不要创建最终飞书文档，也不要汇报“评审已完成”。应轮询或等待两个 Agent 到达终态；如果仍处于 running，继续等待，不要因为暂时没有新输出就提前结束。
+- 达到重试上限后仍失败时，才把该 Agent 标记为 blocked/error，并在文档和最终回复中记录尝试次数、每次错误、等待过程和真实终态；不得编造评审结论。若只有一个 Agent 成功，文档仍须明确区分已完成的报告与未完成的部分。
+
+四、创建飞书云文档（结果汇总）：
 - 先读取 lark-doc 与 lark-shared 的使用要求以及创建文档所需的 references。
 - 默认使用 \`lark-cli docs +create --as user\` 的 XML 格式创建文档；创建后必须检查返回 JSON 的 ok:true 与文档 URL。若失败，请如实报告真实的认证/权限原因，不得假称已创建。
 - 文档标题与正文要清楚标识：本次 MR、评审时间、两个 Agent 的结论、问题清单、证据、验证结果和不确定项。不要广播消息或发送到群聊。
 
-四、红线（管理 Agent 自身）：
+五、红线（管理 Agent 自身）：
 - 不得修改当前仓库代码、不得 git commit/push、不得修改 MR 或发布 MR 评论。只读评审与创建飞书文档是允许的外部写入。
 
-五、最终回复：
+六、最终回复：
 - 汇总两个 Agent 的评审结论要点，并在你自己的最终回复中明确给出所创建飞书文档的 URL（若文档创建失败，则说明失败原因）。`;
 }
 
@@ -582,7 +596,7 @@ MR 链接：${JSON.stringify(targetMrUrl)}
         </Pressable>
       )}
       {branchError ? <Text style={styles.error}>{branchError}</Text> : null}
-      <Text style={styles.subTitle}>指令</Text>
+      <Text style={styles.subTitle}>指令：</Text>
       <Button
         accessibilityLabel="向当前 Agent 发送同步主分支最新代码的指令"
         disabled={branchLoading || !gitBranch.trim()}
