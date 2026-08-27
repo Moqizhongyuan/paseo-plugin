@@ -44,6 +44,8 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
   const [savingBranch, setSavingBranch] = useState(false);
   const [savingMrUrl, setSavingMrUrl] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
+  const [sendingMainSyncPrompt, setSendingMainSyncPrompt] = useState(false);
+  const [sendingMrSyncPrompt, setSendingMrSyncPrompt] = useState(false);
   const [creatingPushAgent, setCreatingPushAgent] = useState(false);
   const [toast, setToast] = useState<{ message: string; variant: ToastVariant } | null>(null);
 
@@ -207,6 +209,70 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
       setToast({ message: errorMessage(cause), variant: "error" });
     } finally {
       setCreatingPushAgent(false);
+    }
+  }
+
+  async function handleSendMrSyncPrompt() {
+    const sourceBranch = gitBranch.trim();
+    const targetMrUrl = mrUrl.trim();
+    if (!sourceBranch || !targetMrUrl || targetMrUrl === DEFAULT_MR_URL || sendingMrSyncPrompt) {
+      return;
+    }
+
+    setSendingMrSyncPrompt(true);
+    setToast(null);
+    try {
+      await paseo.agents.ref(agentId)
+        .send(`请在当前 Workspace 中根据以下 MR 链接同步目标分支的最新代码，并解决产生的冲突：
+MR 链接：${JSON.stringify(targetMrUrl)}
+当前 Agent 绑定分支：${JSON.stringify(sourceBranch)}
+
+1. 先检查 Git 状态、当前分支、远端配置，以及 MR 的源分支和目标分支。请从 MR 链接或对应代码托管平台读取真实信息，不要根据分支名称猜测。
+2. 确认 MR 源分支与当前 Agent 绑定分支一致；如果不一致或无法确认，请停止并说明原因。
+3. 不要丢弃、覆盖或暂存无关的现有改动。如果工作区状态导致无法安全同步，请停止并说明原因。
+4. 拉取 MR 目标分支的最新远端代码，并将其合并到 MR 源分支。默认使用 merge，不要 rebase、force push 或改写已有历史。
+5. 如果产生冲突，请逐项理解双方改动后解决，保留两边仍然需要的业务逻辑；不要简单使用 ours 或 theirs 覆盖。
+6. 完成必要的格式检查、类型检查和测试。如果需要完成 merge，可以创建 merge commit；不要推送远端。
+7. 最后汇报 MR 源分支和目标分支、同步前后的 commit、冲突文件、解决方式、验证结果和当前 Git 状态。`);
+
+      setToast({
+        message: `已向当前 Agent 发送同步 MR 目标分支指令：${targetMrUrl}`,
+        variant: "success",
+      });
+    } catch (cause) {
+      setToast({ message: errorMessage(cause), variant: "error" });
+    } finally {
+      setSendingMrSyncPrompt(false);
+    }
+  }
+
+  async function handleSendMainSyncPrompt() {
+    const currentBranch = gitBranch.trim();
+    if (!currentBranch || sendingMainSyncPrompt) return;
+
+    setSendingMainSyncPrompt(true);
+    setToast(null);
+    try {
+      await paseo.agents.ref(agentId)
+        .send(`请在当前 Workspace 中为当前 Git 分支同步远端主分支的最新代码：
+当前 Agent 绑定分支：${JSON.stringify(currentBranch)}
+
+1. 先检查 Git 状态、当前分支和远端配置，并确认当前分支与上述绑定分支一致；如果不一致，请停止并说明原因。
+2. 从远端 HEAD 或仓库配置确认真实的默认主分支，不要直接假设主分支名称是 main 或 master。
+3. 不要丢弃、覆盖或暂存无关的现有改动。如果工作区状态导致无法安全同步，请停止并说明原因。
+4. 拉取远端主分支的最新代码。如果当前分支就是主分支，请仅做安全的 fast-forward 更新；否则将最新主分支合并到当前分支。不要 rebase、force push 或改写已有历史。
+5. 如果产生冲突，请逐项理解双方改动后解决，保留两边仍然需要的业务逻辑；不要简单使用 ours 或 theirs 覆盖。
+6. 完成必要的格式检查、类型检查和测试。如果需要完成 merge，可以创建 merge commit；不要推送远端。
+7. 最后汇报当前分支、远端主分支、同步前后的 commit、冲突文件、解决方式、验证结果和当前 Git 状态。`);
+
+      setToast({
+        message: `已向当前 Agent 发送同步主分支指令：${currentBranch}`,
+        variant: "success",
+      });
+    } catch (cause) {
+      setToast({ message: errorMessage(cause), variant: "error" });
+    } finally {
+      setSendingMainSyncPrompt(false);
     }
   }
 
@@ -426,6 +492,28 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
       )}
       {branchError ? <Text style={styles.error}>{branchError}</Text> : null}
       <Text style={styles.subTitle}>指令</Text>
+      <Button
+        accessibilityLabel="向当前 Agent 发送同步主分支最新代码的指令"
+        disabled={branchLoading || !gitBranch.trim()}
+        label="同步主分支最新代码"
+        loading={sendingMainSyncPrompt}
+        loadingLabel="正在发送指令…"
+        onPress={() => void handleSendMainSyncPrompt()}
+        style={styles.commandButton}
+        theme={theme}
+      />
+      <Button
+        accessibilityLabel="向当前 Agent 发送同步 MR 目标分支并解决冲突的指令"
+        disabled={
+          branchLoading || !gitBranch.trim() || !mrUrl.trim() || mrUrl.trim() === DEFAULT_MR_URL
+        }
+        label="同步 MR 目标分支"
+        loading={sendingMrSyncPrompt}
+        loadingLabel="正在发送指令…"
+        onPress={() => void handleSendMrSyncPrompt()}
+        style={styles.commandButton}
+        theme={theme}
+      />
       <Button
         accessibilityLabel="创建 Agent 提交并推送当前代码"
         disabled={branchLoading || !gitBranch.trim() || !currentAgentConfig}
