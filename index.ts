@@ -26,6 +26,16 @@ import {
   getShortcutBinding as getShortcutBindingHandler,
   saveShortcutBinding as saveShortcutBindingHandler,
 } from "./src/features/shortcut/server";
+import {
+  getTaskSchedulerSnapshot,
+  startTaskScheduler,
+  stopTaskScheduler,
+} from "./src/features/task-panel/shared";
+import {
+  getTaskSchedulerSnapshot as getTaskSchedulerSnapshotHandler,
+  startTaskScheduler as startTaskSchedulerHandler,
+  stopTaskScheduler as stopTaskSchedulerHandler,
+} from "./src/features/task-panel/server";
 
 export default function contribute(plugin: PluginContext) {
   plugin.handle(listPromptTemplates, listPromptTemplatesHandler);
@@ -36,6 +46,9 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(getShortcutBinding, getShortcutBindingHandler);
   plugin.handle(saveShortcutBinding, saveShortcutBindingHandler);
   plugin.handle(getCurrentBranch, getCurrentBranchHandler);
+  plugin.handle(getTaskSchedulerSnapshot, getTaskSchedulerSnapshotHandler);
+  plugin.handle(startTaskScheduler, startTaskSchedulerHandler);
+  plugin.handle(stopTaskScheduler, stopTaskSchedulerHandler);
   plugin.addWorkspacePanel({
     id: "prompt-templates",
     title: "提示词",
@@ -65,6 +78,15 @@ export default function contribute(plugin: PluginContext) {
     context: "agent",
     onSelect({ openPanel }) {
       openPanel("shortcut");
+    },
+  });
+  plugin.addCommandCenterItem({
+    id: "open-task-panel",
+    title: "打开任务面板",
+    icon: "ListTodo",
+    context: "agent",
+    onSelect({ openPanel }) {
+      openPanel("task-panel");
     },
   });
   return () => {};
