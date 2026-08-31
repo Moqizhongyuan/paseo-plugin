@@ -12,7 +12,7 @@ import type {
 } from "@getpaseo/client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { Button, Modal } from "../../components";
+import { Modal } from "../../components";
 import {
   getExecutionAgentConfig,
   saveExecutionAgentConfig,
@@ -238,8 +238,7 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
         const next = result.config ?? fallback;
         setConfig(next);
         // The inherited configuration is the clean baseline until the user
-        // changes a field. It is not written to disk unless the user presses
-        // Save, but it should not look like an unsaved edit on first render.
+        // changes a field. It is only written when a field is changed.
         setSavedConfig(next);
         setHasPersistedConfig(result.config !== null);
       })
@@ -381,7 +380,7 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
   );
 
   async function openPicker(kind: PickerKind) {
-    if (!config || configLoading) return;
+    if (!config || configLoading || saving) return;
     setPicker(kind);
     setPickerLoading(true);
     try {
@@ -401,15 +400,45 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
     }
   }
 
-  function updateConfig(next: Partial<ExecutionAgentConfig>) {
-    setConfig((current) => (current ? { ...current, ...next } : current));
+  async function updateConfig(next: Partial<ExecutionAgentConfig>) {
+    if (!config || saving || !config.provider.trim()) return;
+
+    const nextConfig = { ...config, ...next };
+    if (
+      nextConfig.provider === config.provider &&
+      nextConfig.modeId === config.modeId &&
+      nextConfig.thinkingOptionId === config.thinkingOptionId
+    ) {
+      setConfigError(null);
+      return;
+    }
+
+    const previousConfig = savedConfig ?? config;
+    setConfig(nextConfig);
+    setSaving(true);
     setConfigError(null);
+    try {
+      const saved = await persistConfig({
+        agentId,
+        provider: nextConfig.provider,
+        modeId: nextConfig.modeId,
+        thinkingOptionId: nextConfig.thinkingOptionId,
+      });
+      setConfig(saved);
+      setSavedConfig(saved);
+      setHasPersistedConfig(true);
+    } catch (cause) {
+      setConfig(previousConfig);
+      setConfigError(`自动保存失败：${errorMessage(cause)}`);
+    } finally {
+      setSaving(false);
+    }
   }
 
   function handleSelectModel(entry: ProviderEntry, model: ProviderModel) {
     const provider = composeProviderModel(entry.provider, model.id);
     const modes = modesByProvider[entry.provider] ?? entry.modes ?? [];
-    updateConfig({
+    void updateConfig({
       provider,
       modeId: defaultModeId(entry, modes),
       thinkingOptionId: defaultThinkingOptionId(model),
@@ -418,47 +447,14 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
   }
 
   function handleSelectMode(modeId: string | null) {
-    updateConfig({ modeId });
+    void updateConfig({ modeId });
     setPicker(null);
   }
 
   function handleSelectThinking(thinkingOptionId: string | null) {
-    updateConfig({ thinkingOptionId });
+    void updateConfig({ thinkingOptionId });
     setPicker(null);
   }
-
-  async function handleSave() {
-    if (!config || saving || !config.provider.trim()) return;
-    setSaving(true);
-    setConfigError(null);
-    try {
-      const saved = await persistConfig({
-        agentId,
-        provider: config.provider,
-        modeId: config.modeId,
-        thinkingOptionId: config.thinkingOptionId,
-      });
-      setConfig(saved);
-      setSavedConfig(saved);
-      setHasPersistedConfig(true);
-    } catch (cause) {
-      setConfigError(errorMessage(cause));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function handleCancel() {
-    setConfig(savedConfig ?? inheritedConfig);
-    setConfigError(null);
-  }
-
-  const dirty =
-    config !== null &&
-    (savedConfig === null ||
-      config.provider !== savedConfig.provider ||
-      config.modeId !== savedConfig.modeId ||
-      config.thinkingOptionId !== savedConfig.thinkingOptionId);
   const selectedProviderLabel = currentProviderParts.entry
     ? providerLabel(currentProviderParts.entry, currentProvider)
     : currentProvider || config?.provider || "未设置";
@@ -466,6 +462,11 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
   const selectedMode = currentModes.find((mode) => mode.id === config?.modeId) ?? null;
   const selectedThinking =
     currentThinkingOptions.find((option) => option.id === config?.thinkingOptionId) ?? null;
+  const selectedModeLabel = selectedMode?.label || config?.modeId || "默认";
+  const selectedModeDescription = selectedMode?.description?.trim() || null;
+  const selectedThinkingLabel = selectedThinking?.label || config?.thinkingOptionId || "默认";
+  const selectedThinkingDescription = selectedThinking?.description?.trim() || null;
+  const selectedModelDescription = currentModel?.description?.trim() || null;
 
   const styles = useMemo(
     () =>
@@ -520,7 +521,7 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
           fontSize: layout.compact ? 12 : 13,
           fontWeight: "500",
         },
-        fieldId: {
+        fieldDescription: {
           color: theme.colors.foregroundMuted,
           fontSize: 10,
           lineHeight: 14,
@@ -538,12 +539,6 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
           color: theme.colors.statusDanger,
           fontSize: 11,
           lineHeight: 16,
-        },
-        actions: {
-          flexDirection: "row",
-          justifyContent: "flex-end",
-          gap: 8,
-          marginTop: 2,
         },
         modalGroup: {
           gap: 6,
@@ -680,23 +675,21 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
           {configLoading
             ? "正在读取…"
             : saving
-              ? "正在保存…"
-              : dirty
-                ? "有未保存修改"
-                : hasPersistedConfig
-                  ? "已保存"
-                  : "跟随当前 Agent"}
+              ? "正在自动保存…"
+              : hasPersistedConfig
+                ? "已自动保存"
+                : "跟随当前 Agent"}
         </Text>
       </View>
       <Pressable
         accessibilityLabel="选择执行 Agent 的 provider 和 model"
         accessibilityRole="button"
-        disabled={configLoading || !config}
+        disabled={configLoading || saving || !config}
         onPress={() => void openPicker("model")}
         style={({ pressed }) => [
           styles.field,
           pressed && { opacity: 0.75 },
-          !config && styles.fieldDisabled,
+          (saving || !config) && styles.fieldDisabled,
         ]}
       >
         <Text style={styles.fieldLabel}>provider：</Text>
@@ -704,9 +697,11 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
           <Text numberOfLines={1} style={styles.fieldValue}>
             {selectedProviderLabel} · {selectedModelLabel}
           </Text>
-          <Text numberOfLines={1} style={styles.fieldId}>
-            {config?.provider || "未设置"}
-          </Text>
+          {selectedModelDescription ? (
+            <Text numberOfLines={2} style={styles.fieldDescription}>
+              {selectedModelDescription}
+            </Text>
+          ) : null}
         </View>
         <Text accessible={false} style={styles.chevron}>
           ›
@@ -715,22 +710,22 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
       <Pressable
         accessibilityLabel="选择执行 Agent 的 modeId"
         accessibilityRole="button"
-        disabled={configLoading || !config || !currentProvider}
+        disabled={configLoading || saving || !config || !currentProvider}
         onPress={() => void openPicker("mode")}
         style={({ pressed }) => [
           styles.field,
           pressed && { opacity: 0.75 },
-          (!config || !currentProvider) && styles.fieldDisabled,
+          (saving || !config || !currentProvider) && styles.fieldDisabled,
         ]}
       >
         <Text style={styles.fieldLabel}>modeId：</Text>
         <View style={styles.fieldContent}>
           <Text numberOfLines={1} style={styles.fieldValue}>
-            {selectedMode?.label || config?.modeId || "默认"}
+            {selectedModeLabel}
           </Text>
-          {selectedMode ? (
-            <Text numberOfLines={1} style={styles.fieldId}>
-              {selectedMode.id}
+          {selectedModeDescription ? (
+            <Text numberOfLines={2} style={styles.fieldDescription}>
+              {selectedModeDescription}
             </Text>
           ) : null}
         </View>
@@ -741,22 +736,22 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
       <Pressable
         accessibilityLabel="选择执行 Agent 的 thinkingOptionId"
         accessibilityRole="button"
-        disabled={configLoading || !config || !currentModel}
+        disabled={configLoading || saving || !config || !currentModel}
         onPress={() => void openPicker("thinking")}
         style={({ pressed }) => [
           styles.field,
           pressed && { opacity: 0.75 },
-          (!config || !currentModel) && styles.fieldDisabled,
+          (saving || !config || !currentModel) && styles.fieldDisabled,
         ]}
       >
         <Text style={styles.fieldLabel}>thinkingOptionId：</Text>
         <View style={styles.fieldContent}>
           <Text numberOfLines={1} style={styles.fieldValue}>
-            {selectedThinking?.label || config?.thinkingOptionId || "默认"}
+            {selectedThinkingLabel}
           </Text>
-          {selectedThinking ? (
-            <Text numberOfLines={1} style={styles.fieldId}>
-              {selectedThinking.id}
+          {selectedThinkingDescription ? (
+            <Text numberOfLines={2} style={styles.fieldDescription}>
+              {selectedThinkingDescription}
             </Text>
           ) : null}
         </View>
@@ -765,29 +760,9 @@ export function AgentConfigPanel({ theme, layout, agentId, cwd }: AgentConfigPan
         </Text>
       </Pressable>
       <Text style={styles.hint}>
-        默认读取当前 Agent 配置；这里只保存选择，子 Agent 由父 Agent 控制执行。
+        默认读取当前 Agent 配置；修改任一选项后自动保存，子 Agent 由父 Agent 控制执行。
       </Text>
       {configError ? <Text style={styles.error}>{configError}</Text> : null}
-      {dirty ? (
-        <View style={styles.actions}>
-          <Button
-            disabled={saving}
-            label="取消"
-            onPress={handleCancel}
-            size="small"
-            theme={theme}
-            variant="ghost"
-          />
-          <Button
-            disabled={saving || !config?.provider.trim()}
-            label="保存配置"
-            loading={saving}
-            onPress={() => void handleSave()}
-            size="small"
-            theme={theme}
-          />
-        </View>
-      ) : null}
       <Modal
         compact={layout.compact}
         onRequestClose={() => setPicker(null)}

@@ -1,6 +1,6 @@
 import { type PluginAgentPanelProps, useAgent, useRpc, useWorkspace } from "@getpaseo/plugin";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Clipboard, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Clipboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Card, Toast, type ToastVariant } from "../../components";
 import { AgentConfigPanel } from "./agent-config";
 import {
@@ -38,7 +38,7 @@ function composeProviderModel(provider: string, model: string | null) {
   return `${normalizedProvider}/${normalizedModel}`;
 }
 
-function buildBeadsPrompt(config: ExecutionAgentConfig | null) {
+function buildBeadsPrompt(config: ExecutionAgentConfig | null, requirement: string) {
   const launchConfig = config
     ? {
         provider: config.provider,
@@ -53,27 +53,32 @@ function buildBeadsPrompt(config: ExecutionAgentConfig | null) {
 
 ${JSON.stringify(launchConfig, null, 2)}`
     : "任务面板当前没有读取到单独保存的执行 Agent 配置。请使用当前主 Agent 的有效 provider/model、modeId 和 thinkingOptionId，并在创建时显式传入，不要猜测或静默改用其他配置。";
+  const requirementSection = requirement.trim() || "（未填写本次需求，请先补充后再开始执行。）";
 
   return `你是当前任务的主 Agent，只需要负责设计和推进本次工作的 Beads 任务图，并由你决定何时创建和如何协调子 Agent。
 
-一、设计 Beads
+一、本次用户需求
+${requirementSection}
+
+二、设计 Beads
 1. 先读取当前工作区已有的 Beads 和依赖关系（例如使用 bd list、bd show），理解已有任务后再修改，避免重复创建。
 2. 将用户目标拆成一个清晰的父 bead/epic，以及粒度适中、可以独立验收的子 bead。每个子 bead 都写明目标、背景、允许范围、禁止范围、完成标准、验证命令和阻塞条件。
 3. 显式建立依赖关系、优先级和执行顺序。不要用任务标题或编号猜测依赖，也不要覆盖与本次目标无关的已有 bead。
 4. 先向用户或当前会话说明任务图；信息足够时直接按依赖顺序推进，不为了形式拆出没有独立价值的子任务。
 
-二、按执行 Agent 配置创建子 Agent
+三、按执行 Agent 配置创建子 Agent
 ${configSection}
 
 1. 使用 Paseo agent-scoped MCP create_agent 创建真正的子 Agent，让 Paseo 保留父子关系；不要使用脚本、定时任务或插件调度器代替父 Agent 编排。
 2. 将上面的完整 provider/model 传给 create_agent.provider，并将非空的 modeId、thinkingOptionId 放入 create_agent.settings。配置中的空值要省略，不要自行发明值。
-3. 每个子 Agent 对应一个明确的子 bead，在 initialPrompt 中带上 bead ID、目标、范围、完成标准、验证命令和回报格式。创建后核对 parent、workspace、provider/model 和 settings 是否符合预期。
+3. 每个子 Agent 对应一个明确的子 bead，在 initialPrompt 中带上 bead ID、目标、范围、完成标准、验证命令和回报格式。子 Agent 创建成功后，立即使用命令 bd update <beadId> --assignee "<provider>" 将对应 bead 的 assignee 设置为本次执行配置中的完整 provider（包含 model，例如 codex/gpt-5.6-sol），按原字符串传入并在 shell 中正确引用；不要填入 Paseo Agent ID，不要写入 metadata，也不要使用 owner 代替。子 Agent 返回的 Agent ID 仅用于核对 parent、workspace、provider/model 和 settings 是否符合预期。
 4. 子 Agent 只负责自己的 bead，并把完成证据、失败原因、阻塞条件或新增任务建议直接报告给父 Agent。是否更新状态、调整依赖或新增 bead，由父 Agent 决定。
 
-三、推进和收尾
+四、推进和收尾
 1. 父 Agent 负责选择执行顺序、等待和汇总子 Agent 结果，并根据真实证据更新 Beads 状态；不要让子 Agent 自行派发兄弟任务或启动后台调度。
 2. 如果发现需要新增工作，先向父 Agent 报告理由和建议内容，由父 Agent 判断是否创建新的 bead，再重新安排依赖。
-3. 最终汇报 Beads 任务图、每个子任务对应的 Agent、执行配置、验证结果、未解决阻塞和后续建议。`;
+3. 本次任务图中的所有子任务完成且父 Agent 验收通过后，收集本次创建的父 bead/epic 和全部子 bead ID，先执行 bd delete <id...> --dry-run 核对删除范围，再执行 bd delete <id...> --force 永久删除这些 Beads。不要使用 --cascade，不要删除任务开始前已有或与本次工作无关的 bead；如果预览包含无关任务，则停止清理并报告。
+4. 最终汇报每个子任务对应的 Agent、执行配置、验证结果、Beads 清理结果、未解决阻塞和后续建议。`;
 }
 
 function errorMessage(error: unknown) {
@@ -120,6 +125,7 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
   const [snapshot, setSnapshot] = useState<BeadsTaskList | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [requirement, setRequirement] = useState("");
   const [copyingPrompt, setCopyingPrompt] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; variant: ToastVariant } | null>(null);
@@ -167,6 +173,27 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
           color: theme.colors.foreground,
           fontSize: layout.compact ? 11 : 12,
           fontWeight: "600",
+        },
+        requirementSection: {
+          gap: 6,
+        },
+        requirementLabel: {
+          color: theme.colors.foreground,
+          fontSize: layout.compact ? 12 : 13,
+          fontWeight: "600",
+        },
+        requirementInput: {
+          minHeight: layout.compact ? 76 : 96,
+          maxHeight: 180,
+          paddingHorizontal: 10,
+          paddingVertical: 8,
+          color: theme.colors.foreground,
+          fontSize: layout.compact ? 12 : 13,
+          lineHeight: 18,
+          borderWidth: 1,
+          borderColor: theme.colors.foregroundMuted,
+          borderRadius: 8,
+          textAlignVertical: "top",
         },
         listSection: {
           flex: 1,
@@ -304,7 +331,7 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
         }
       }
 
-      await copyToClipboard(buildBeadsPrompt(config));
+      await copyToClipboard(buildBeadsPrompt(config, requirement));
       const message =
         configSource === "saved"
           ? "已复制提示词，已带入已保存的执行 Agent 配置"
@@ -321,7 +348,7 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
     } finally {
       setCopyingPrompt(false);
     }
-  }, [agentId, copyingPrompt, inheritedConfig, loadExecutionConfig]);
+  }, [agentId, copyingPrompt, inheritedConfig, loadExecutionConfig, requirement]);
 
   const refreshTasks = useCallback(
     async (initial = false) => {
@@ -396,6 +423,19 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
             <Text style={styles.headerButtonLabel}>{refreshing ? "刷新中…" : "刷新"}</Text>
           </Pressable>
         </View>
+      </View>
+
+      <View style={styles.requirementSection}>
+        <Text style={styles.requirementLabel}>本次需求（复制提示词时会带入）：</Text>
+        <TextInput
+          accessibilityLabel="填写本次 Beads 任务需求"
+          multiline
+          onChangeText={setRequirement}
+          placeholder="请输入希望主 Agent 设计和推进的具体需求"
+          placeholderTextColor={theme.colors.foregroundMuted}
+          style={styles.requirementInput}
+          value={requirement}
+        />
       </View>
 
       <AgentConfigPanel agentId={agentId} cwd={workspaceDirectory} layout={layout} theme={theme} />
