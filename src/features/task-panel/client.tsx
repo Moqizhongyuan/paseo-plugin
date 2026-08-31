@@ -1,31 +1,83 @@
-import { type PluginAgentPanelProps, useRpc, useWorkspace } from "@getpaseo/plugin";
-import { useEffect, useMemo, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { Card } from "../../components";
+import { type PluginAgentPanelProps, useAgent, useRpc, useWorkspace } from "@getpaseo/plugin";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Clipboard, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Card, Toast, type ToastVariant } from "../../components";
+import { AgentConfigPanel } from "./agent-config";
 import {
-  getTaskSchedulerSnapshot,
-  startTaskScheduler,
-  stopTaskScheduler,
-  type TaskSchedulerSnapshot,
-  type TaskSchedulerTask,
+  getBeadsTaskList,
+  getExecutionAgentConfig,
+  type BeadsTask,
+  type BeadsTaskList,
+  type ExecutionAgentConfig,
 } from "./shared";
 
-const SNAPSHOT_REFRESH_INTERVAL_MS = 3_000;
+async function copyToClipboard(text: string) {
+  const browserClipboard = globalThis.navigator?.clipboard;
+  if (browserClipboard?.writeText) {
+    try {
+      await browserClipboard.writeText(text);
+      return;
+    } catch {
+      // Fall back to the React Native clipboard implementation.
+    }
+  }
+
+  try {
+    Clipboard.setString(text);
+  } catch {
+    throw new Error("当前运行环境不支持复制到剪切板");
+  }
+}
+
+function composeProviderModel(provider: string, model: string | null) {
+  const normalizedProvider = provider.trim();
+  const normalizedModel = model?.trim() ?? "";
+  if (!normalizedModel || normalizedProvider.endsWith(`/${normalizedModel}`)) {
+    return normalizedProvider;
+  }
+  return `${normalizedProvider}/${normalizedModel}`;
+}
+
+function buildBeadsPrompt(config: ExecutionAgentConfig | null) {
+  const launchConfig = config
+    ? {
+        provider: config.provider,
+        settings: {
+          ...(config.modeId ? { modeId: config.modeId } : {}),
+          ...(config.thinkingOptionId ? { thinkingOptionId: config.thinkingOptionId } : {}),
+        },
+      }
+    : null;
+  const configSection = launchConfig
+    ? `任务面板当前有效的执行 Agent 配置如下（provider 已包含完整的 model），可直接作为 Paseo MCP create_agent 的参数：
+
+${JSON.stringify(launchConfig, null, 2)}`
+    : "任务面板当前没有读取到单独保存的执行 Agent 配置。请使用当前主 Agent 的有效 provider/model、modeId 和 thinkingOptionId，并在创建时显式传入，不要猜测或静默改用其他配置。";
+
+  return `你是当前任务的主 Agent，只需要负责设计和推进本次工作的 Beads 任务图，并由你决定何时创建和如何协调子 Agent。
+
+一、设计 Beads
+1. 先读取当前工作区已有的 Beads 和依赖关系（例如使用 bd list、bd show），理解已有任务后再修改，避免重复创建。
+2. 将用户目标拆成一个清晰的父 bead/epic，以及粒度适中、可以独立验收的子 bead。每个子 bead 都写明目标、背景、允许范围、禁止范围、完成标准、验证命令和阻塞条件。
+3. 显式建立依赖关系、优先级和执行顺序。不要用任务标题或编号猜测依赖，也不要覆盖与本次目标无关的已有 bead。
+4. 先向用户或当前会话说明任务图；信息足够时直接按依赖顺序推进，不为了形式拆出没有独立价值的子任务。
+
+二、按执行 Agent 配置创建子 Agent
+${configSection}
+
+1. 使用 Paseo agent-scoped MCP create_agent 创建真正的子 Agent，让 Paseo 保留父子关系；不要使用脚本、定时任务或插件调度器代替父 Agent 编排。
+2. 将上面的完整 provider/model 传给 create_agent.provider，并将非空的 modeId、thinkingOptionId 放入 create_agent.settings。配置中的空值要省略，不要自行发明值。
+3. 每个子 Agent 对应一个明确的子 bead，在 initialPrompt 中带上 bead ID、目标、范围、完成标准、验证命令和回报格式。创建后核对 parent、workspace、provider/model 和 settings 是否符合预期。
+4. 子 Agent 只负责自己的 bead，并把完成证据、失败原因、阻塞条件或新增任务建议直接报告给父 Agent。是否更新状态、调整依赖或新增 bead，由父 Agent 决定。
+
+三、推进和收尾
+1. 父 Agent 负责选择执行顺序、等待和汇总子 Agent 结果，并根据真实证据更新 Beads 状态；不要让子 Agent 自行派发兄弟任务或启动后台调度。
+2. 如果发现需要新增工作，先向父 Agent 报告理由和建议内容，由父 Agent 判断是否创建新的 bead，再重新安排依赖。
+3. 最终汇报 Beads 任务图、每个子任务对应的 Agent、执行配置、验证结果、未解决阻塞和后续建议。`;
+}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "操作失败，请稍后重试";
-}
-
-function phaseLabel(phase: TaskSchedulerSnapshot["phase"]) {
-  return {
-    stopped: "已停止",
-    starting: "正在启动",
-    checking: "正在检查任务",
-    waiting: "等待可执行任务",
-    dispatching: "正在派发任务",
-    executing: "子 Agent 执行中",
-    error: "调度异常",
-  }[phase];
 }
 
 function statusLabel(status: string) {
@@ -40,33 +92,37 @@ function statusLabel(status: string) {
   );
 }
 
-function agentStatusLabel(status: string) {
-  return (
-    {
-      initializing: "初始化中",
-      idle: "空闲",
-      running: "运行中",
-      error: "错误",
-      closed: "已关闭",
-    }[status] ?? status
-  );
-}
-
-function assignedAgent(task: TaskSchedulerTask) {
-  if (task.agentId) return `子 Agent：${task.agentId}`;
-  if (task.assignee) return `Beads：${task.assignee}`;
-  return "未指派 Agent";
+function assigneeLabel(task: BeadsTask) {
+  return task.assignee ? `认领 Agent：${task.assignee}` : "未认领 Agent";
 }
 
 export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPanelProps) {
   const workspaceDirectory = useWorkspace(workspaceId, ({ directory }) => directory);
-  const loadSnapshot = useRpc(getTaskSchedulerSnapshot);
-  const startScheduler = useRpc(startTaskScheduler);
-  const stopScheduler = useRpc(stopTaskScheduler);
-  const [snapshot, setSnapshot] = useState<TaskSchedulerSnapshot | null>(null);
+  const currentAgent = useAgent(
+    agentId,
+    ({ provider, model, currentModeId, thinkingOptionId }) => ({
+      provider,
+      model,
+      currentModeId,
+      thinkingOptionId,
+    }),
+  );
+  const loadTaskList = useRpc(getBeadsTaskList);
+  const loadExecutionConfig = useRpc(getExecutionAgentConfig);
+  const inheritedConfig = useMemo<ExecutionAgentConfig | null>(() => {
+    if (!currentAgent?.provider?.trim()) return null;
+    return {
+      provider: composeProviderModel(currentAgent.provider, currentAgent.model),
+      modeId: currentAgent.currentModeId,
+      thinkingOptionId: currentAgent.thinkingOptionId,
+    };
+  }, [currentAgent]);
+  const [snapshot, setSnapshot] = useState<BeadsTaskList | null>(null);
   const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [copyingPrompt, setCopyingPrompt] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; variant: ToastVariant } | null>(null);
 
   const styles = useMemo(
     () =>
@@ -90,43 +146,27 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
           fontWeight: "700",
           lineHeight: layout.compact ? 28 : 32,
         },
-        toggle: {
+        headerActions: {
           flexDirection: "row",
           alignItems: "center",
           gap: 8,
-          minHeight: 36,
           flexShrink: 0,
         },
-        toggleTrack: {
-          width: 44,
-          height: 26,
+        headerButton: {
+          minHeight: 34,
           justifyContent: "center",
-          padding: 3,
-          borderRadius: 13,
-          backgroundColor: theme.colors.foregroundMuted,
+          paddingHorizontal: 10,
+          borderRadius: 8,
+          borderWidth: 1,
+          borderColor: theme.colors.foregroundMuted,
         },
-        toggleTrackEnabled: {
-          backgroundColor: theme.colors.accent,
+        headerButtonDisabled: {
+          opacity: 0.55,
         },
-        toggleThumb: {
-          width: 20,
-          height: 20,
-          borderRadius: 10,
-          backgroundColor: theme.colors.surface0,
-        },
-        toggleThumbEnabled: {
-          transform: [{ translateX: 18 }],
-        },
-        toggleLabel: {
-          color: theme.colors.foregroundMuted,
-          fontSize: 13,
-          fontWeight: "600",
-        },
-        toggleLabelEnabled: {
+        headerButtonLabel: {
           color: theme.colors.foreground,
-        },
-        pressed: {
-          opacity: 0.75,
+          fontSize: layout.compact ? 11 : 12,
+          fontWeight: "600",
         },
         listSection: {
           flex: 1,
@@ -145,10 +185,12 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
           fontWeight: "600",
           lineHeight: 18,
         },
-        schedulerStatus: {
+        listStatus: {
+          flexShrink: 1,
           color: theme.colors.foregroundMuted,
           fontSize: 12,
           lineHeight: 18,
+          textAlign: "right",
         },
         error: {
           color: theme.colors.statusDanger,
@@ -232,117 +274,94 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
           fontSize: 12,
           lineHeight: 18,
         },
-        taskError: {
-          color: theme.colors.statusDanger,
-          fontSize: 12,
-          lineHeight: 18,
-        },
       }),
     [layout.compact, theme],
   );
 
-  useEffect(() => {
-    let active = true;
+  const handleCopyPrompt = useCallback(async () => {
+    if (copyingPrompt) return;
 
-    if (!workspaceDirectory) {
-      setSnapshot(null);
-      setLoading(false);
-      setError(null);
-      return () => {
-        active = false;
-      };
-    }
-
-    const input = { workspaceId, parentAgentId: agentId, directory: workspaceDirectory };
-
-    async function loadInitialSnapshot() {
+    setCopyingPrompt(true);
+    setToast(null);
+    let config: ExecutionAgentConfig | null = null;
+    let configSource: "saved" | "current" | "none" = "none";
+    let configReadFailed = false;
+    try {
       try {
-        const nextSnapshot = await loadSnapshot(input);
-        if (!active) return;
-        setSnapshot(nextSnapshot);
-        setError(nextSnapshot.lastError);
-      } catch (cause) {
-        if (active) setError(errorMessage(cause));
-      } finally {
-        if (active) setLoading(false);
-      }
-    }
-
-    setLoading(true);
-    setSnapshot(null);
-    void loadInitialSnapshot();
-    return () => {
-      active = false;
-    };
-  }, [agentId, loadSnapshot, workspaceDirectory, workspaceId]);
-
-  useEffect(() => {
-    if (!workspaceDirectory || !snapshot?.enableCycle) return;
-
-    let active = true;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const input = { workspaceId, parentAgentId: agentId, directory: workspaceDirectory };
-
-    async function refreshSnapshot() {
-      let keepRefreshing = true;
-      try {
-        const nextSnapshot = await loadSnapshot(input);
-        if (!active) return;
-        keepRefreshing = nextSnapshot.enableCycle;
-        setSnapshot(nextSnapshot);
-        setError(nextSnapshot.lastError);
-      } catch (cause) {
-        if (active) setError(errorMessage(cause));
-      } finally {
-        if (active && keepRefreshing) {
-          timer = setTimeout(() => {
-            void refreshSnapshot();
-          }, SNAPSHOT_REFRESH_INTERVAL_MS);
+        const result = await loadExecutionConfig({ agentId });
+        if (result.config) {
+          config = result.config;
+          configSource = "saved";
+        } else if (inheritedConfig) {
+          config = inheritedConfig;
+          configSource = "current";
+        }
+      } catch {
+        configReadFailed = true;
+        if (inheritedConfig) {
+          config = inheritedConfig;
+          configSource = "current";
         }
       }
-    }
 
-    timer = setTimeout(() => {
-      void refreshSnapshot();
-    }, SNAPSHOT_REFRESH_INTERVAL_MS);
-    return () => {
-      active = false;
-      if (timer) clearTimeout(timer);
-    };
-  }, [agentId, loadSnapshot, snapshot?.enableCycle, workspaceDirectory, workspaceId]);
-
-  async function handleToggle() {
-    if (!workspaceDirectory || actionLoading) return;
-
-    const input = { workspaceId, parentAgentId: agentId, directory: workspaceDirectory };
-    setActionLoading(true);
-    setError(null);
-    try {
-      const nextSnapshot = snapshot?.enableCycle
-        ? await stopScheduler(input)
-        : await startScheduler(input);
-      setSnapshot(nextSnapshot);
-      setError(nextSnapshot.lastError);
+      await copyToClipboard(buildBeadsPrompt(config));
+      const message =
+        configSource === "saved"
+          ? "已复制提示词，已带入已保存的执行 Agent 配置"
+          : configSource === "current"
+            ? configReadFailed
+              ? "已复制提示词，已带入当前 Agent 配置（保存配置读取失败）"
+              : "已复制提示词，已带入当前 Agent 配置"
+            : configReadFailed
+              ? "已复制提示词，但未读取到执行 Agent 配置"
+              : "已复制提示词，当前没有可用的执行 Agent 配置";
+      setToast({ message, variant: "success" });
     } catch (cause) {
-      setError(errorMessage(cause));
+      setToast({ message: errorMessage(cause), variant: "error" });
     } finally {
-      setActionLoading(false);
+      setCopyingPrompt(false);
     }
-  }
+  }, [agentId, copyingPrompt, inheritedConfig, loadExecutionConfig]);
 
-  const loopEnabled = snapshot?.enableCycle ?? false;
+  const refreshTasks = useCallback(
+    async (initial = false) => {
+      if (!workspaceDirectory) {
+        setSnapshot(null);
+        setError(null);
+        setLoading(false);
+        return;
+      }
+
+      if (initial) setLoading(true);
+      else setRefreshing(true);
+      setError(null);
+      try {
+        const nextSnapshot = await loadTaskList({ directory: workspaceDirectory });
+        setSnapshot(nextSnapshot);
+        setError(nextSnapshot.lastError);
+      } catch (cause) {
+        setError(errorMessage(cause));
+      } finally {
+        if (initial) setLoading(false);
+        else setRefreshing(false);
+      }
+    },
+    [loadTaskList, workspaceDirectory],
+  );
+
+  useEffect(() => {
+    setSnapshot(null);
+    void refreshTasks(true);
+  }, [refreshTasks]);
+
   const taskCount = snapshot?.tasks.length ?? 0;
-  const statusText = snapshot
-    ? snapshot.beadsAvailable
-      ? `${phaseLabel(snapshot.phase)} · 活跃 ${snapshot.activeTaskCount}${
-          snapshot.pendingNotificationCount > 0
-            ? ` · 待通知 ${snapshot.pendingNotificationCount}`
-            : ""
-        }`
-      : "当前目录未初始化 Beads"
-    : loading
-      ? "正在读取任务"
-      : "等待工作区";
+  const listStatus = loading
+    ? "正在读取任务"
+    : refreshing
+      ? "正在刷新"
+      : snapshot?.beadsAvailable
+        ? `共 ${taskCount} 项`
+        : "当前目录未初始化 Beads";
 
   return (
     <View style={styles.screen}>
@@ -350,32 +369,43 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
         <Text accessibilityRole="header" style={styles.title}>
           任务面板
         </Text>
-        <Pressable
-          accessibilityLabel="任务循环"
-          accessibilityRole="switch"
-          accessibilityState={{
-            checked: loopEnabled,
-            disabled: actionLoading || !workspaceDirectory,
-          }}
-          disabled={actionLoading || !workspaceDirectory}
-          onPress={() => void handleToggle()}
-          style={({ pressed }) => [styles.toggle, pressed && styles.pressed]}
-        >
-          <Text style={[styles.toggleLabel, loopEnabled && styles.toggleLabelEnabled]}>
-            {actionLoading ? "处理中…" : loopEnabled ? "循环已开启" : "开启循环"}
-          </Text>
-          <View style={[styles.toggleTrack, loopEnabled && styles.toggleTrackEnabled]}>
-            <View style={[styles.toggleThumb, loopEnabled && styles.toggleThumbEnabled]} />
-          </View>
-        </Pressable>
+        <View style={styles.headerActions}>
+          <Pressable
+            accessibilityLabel="复制 Beads 父 Agent 提示词"
+            accessibilityRole="button"
+            disabled={copyingPrompt}
+            onPress={() => void handleCopyPrompt()}
+            style={({ pressed }) => [
+              styles.headerButton,
+              (pressed || copyingPrompt) && styles.headerButtonDisabled,
+            ]}
+          >
+            <Text style={styles.headerButtonLabel}>{copyingPrompt ? "复制中…" : "复制提示词"}</Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel="刷新 Beads 任务"
+            accessibilityRole="button"
+            disabled={loading || refreshing || !workspaceDirectory}
+            onPress={() => void refreshTasks()}
+            style={({ pressed }) => [
+              styles.headerButton,
+              (pressed || loading || refreshing || !workspaceDirectory) &&
+                styles.headerButtonDisabled,
+            ]}
+          >
+            <Text style={styles.headerButtonLabel}>{refreshing ? "刷新中…" : "刷新"}</Text>
+          </Pressable>
+        </View>
       </View>
+
+      <AgentConfigPanel agentId={agentId} cwd={workspaceDirectory} layout={layout} theme={theme} />
 
       <View style={styles.listSection}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>
             BEADS 任务{taskCount > 0 ? ` · ${taskCount}` : ""}
           </Text>
-          <Text style={styles.schedulerStatus}>{statusText}</Text>
+          <Text style={styles.listStatus}>{listStatus}</Text>
         </View>
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
@@ -411,12 +441,7 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
                       {task.description}
                     </Text>
                   ) : null}
-                  <Text style={styles.taskMeta}>{assignedAgent(task)}</Text>
-                  {task.agentStatus ? (
-                    <Text style={styles.taskMeta}>
-                      Agent 状态：{agentStatusLabel(task.agentStatus)}
-                    </Text>
-                  ) : null}
+                  <Text style={styles.taskMeta}>{assigneeLabel(task)}</Text>
                   {task.dependencies.length > 0 ? (
                     <Text style={styles.taskDependency}>
                       前置依赖：
@@ -427,13 +452,20 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
                         .join("、")}
                     </Text>
                   ) : null}
-                  {task.error ? <Text style={styles.taskError}>{task.error}</Text> : null}
                 </Card>
               );
             })
           )}
         </ScrollView>
       </View>
+      <Toast
+        compact={layout.compact}
+        message={toast?.message ?? ""}
+        onDismiss={() => setToast(null)}
+        theme={theme}
+        variant={toast?.variant ?? "success"}
+        visible={toast !== null}
+      />
     </View>
   );
 }

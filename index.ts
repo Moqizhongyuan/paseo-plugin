@@ -27,14 +27,14 @@ import {
   saveShortcutBinding as saveShortcutBindingHandler,
 } from "./src/features/shortcut/server";
 import {
-  getTaskSchedulerSnapshot,
-  startTaskScheduler,
-  stopTaskScheduler,
+  getBeadsTaskList,
+  getExecutionAgentConfig,
+  saveExecutionAgentConfig,
 } from "./src/features/task-panel/shared";
 import {
-  getTaskSchedulerSnapshot as getTaskSchedulerSnapshotHandler,
-  startTaskScheduler as startTaskSchedulerHandler,
-  stopTaskScheduler as stopTaskSchedulerHandler,
+  getBeadsTaskList as getBeadsTaskListHandler,
+  getExecutionAgentConfig as getExecutionAgentConfigHandler,
+  saveExecutionAgentConfig as saveExecutionAgentConfigHandler,
 } from "./src/features/task-panel/server";
 
 export default function contribute(plugin: PluginContext) {
@@ -46,9 +46,9 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(getShortcutBinding, getShortcutBindingHandler);
   plugin.handle(saveShortcutBinding, saveShortcutBindingHandler);
   plugin.handle(getCurrentBranch, getCurrentBranchHandler);
-  plugin.handle(getTaskSchedulerSnapshot, getTaskSchedulerSnapshotHandler);
-  plugin.handle(startTaskScheduler, startTaskSchedulerHandler);
-  plugin.handle(stopTaskScheduler, stopTaskSchedulerHandler);
+  plugin.handle(getExecutionAgentConfig, getExecutionAgentConfigHandler);
+  plugin.handle(saveExecutionAgentConfig, saveExecutionAgentConfigHandler);
+  plugin.handle(getBeadsTaskList, getBeadsTaskListHandler);
   plugin.addWorkspacePanel({
     id: "prompt-templates",
     title: "提示词",
