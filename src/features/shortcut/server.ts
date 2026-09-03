@@ -21,6 +21,7 @@ const storageFile = join(storageDirectory, "shortcut-bindings.json");
 interface ShortcutBinding {
   branch?: string;
   mrUrl?: string;
+  meegoUrl?: string;
 }
 
 type ShortcutBindings = Record<string, ShortcutBinding>;
@@ -45,8 +46,12 @@ function normalizeBinding(value: unknown): ShortcutBinding | null {
     typeof record.branch === "string" && record.branch.trim() ? record.branch.trim() : undefined;
   const mrUrl =
     typeof record.mrUrl === "string" && record.mrUrl.trim() ? record.mrUrl.trim() : undefined;
+  const meegoUrl =
+    typeof record.meegoUrl === "string" && record.meegoUrl.trim()
+      ? record.meegoUrl.trim()
+      : undefined;
 
-  return branch || mrUrl ? { branch, mrUrl } : null;
+  return branch || mrUrl || meegoUrl ? { branch, mrUrl, meegoUrl } : null;
 }
 
 async function readBindings(): Promise<ShortcutBindings> {
@@ -75,16 +80,34 @@ async function writeBindings(bindings: ShortcutBindings) {
 export async function getShortcutBinding({ agentId }: GetShortcutBindingInput) {
   const bindings = await readBindings();
   const binding = bindings[agentId];
-  return { branch: binding?.branch ?? null, mrUrl: binding?.mrUrl ?? null };
+  return {
+    branch: binding?.branch ?? null,
+    mrUrl: binding?.mrUrl ?? null,
+    meegoUrl: binding?.meegoUrl ?? null,
+  };
 }
 
-export async function saveShortcutBinding({ agentId, branch, mrUrl }: SaveShortcutBindingInput) {
+export async function saveShortcutBinding({
+  agentId,
+  branch,
+  mrUrl,
+  meegoUrl,
+}: SaveShortcutBindingInput) {
   const bindings = await readBindings();
   const normalizedBranch = branch.trim();
   const normalizedMrUrl = mrUrl.trim();
-  bindings[agentId] = { branch: normalizedBranch, mrUrl: normalizedMrUrl };
+  const normalizedMeegoUrl = meegoUrl.trim();
+  bindings[agentId] = {
+    branch: normalizedBranch,
+    mrUrl: normalizedMrUrl,
+    meegoUrl: normalizedMeegoUrl,
+  };
   await writeBindings(bindings);
-  return { branch: normalizedBranch, mrUrl: normalizedMrUrl };
+  return {
+    branch: normalizedBranch,
+    mrUrl: normalizedMrUrl,
+    meegoUrl: normalizedMeegoUrl,
+  };
 }
 
 export async function getCurrentBranchHandler({ directory }: GetCurrentBranchInput) {

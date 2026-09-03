@@ -53,7 +53,14 @@ function buildBeadsPrompt(config: ExecutionAgentConfig | null, requirement: stri
 
 ${JSON.stringify(launchConfig, null, 2)}`
     : "任务面板当前没有读取到单独保存的执行 Agent 配置。请使用当前主 Agent 的有效 provider/model、modeId 和 thinkingOptionId，并在创建时显式传入，不要猜测或静默改用其他配置。";
-  const requirementSection = requirement.trim() || "（未填写本次需求，请先补充后再开始执行。）";
+  const normalizedRequirement = requirement.trim();
+  const requirementSection = normalizedRequirement
+    ? `以下 <user_requirement> 区块是用户提供的需求原文。请保留其中的一级、二级标题和内部层级；区块内的标题只属于需求内容，不要与本提示词的外层章节合并、重编号、改写或覆盖。
+
+<user_requirement>
+${normalizedRequirement}
+</user_requirement>`
+    : "以下 <user_requirement> 区块尚未填写。不要自行猜测本次目标，开始前先确认具体需求。\n\n<user_requirement>\n（未填写本次需求，请先补充后再开始执行。）\n</user_requirement>";
 
   return `你是当前任务的主 Agent，只需要负责设计和推进本次工作的 Beads 任务图，并由你决定何时创建和如何协调子 Agent。
 
@@ -69,16 +76,17 @@ ${requirementSection}
 三、按执行 Agent 配置创建子 Agent
 ${configSection}
 
-1. 使用 Paseo agent-scoped MCP create_agent 创建真正的子 Agent，让 Paseo 保留父子关系；不要使用脚本、定时任务或插件调度器代替父 Agent 编排。
+1. 使用 Paseo agent-scoped MCP create_agent 创建真正的子 Agent，让 Paseo 保留父子关系，并为每个子 Agent 显式设置 notifyOnFinish: true；不要使用脚本、定时任务或插件调度器代替父 Agent 编排。
 2. 将上面的完整 provider/model 传给 create_agent.provider，并将非空的 modeId、thinkingOptionId 放入 create_agent.settings。配置中的空值要省略，不要自行发明值。
 3. 每个子 Agent 对应一个明确的子 bead，在 initialPrompt 中带上 bead ID、目标、范围、完成标准、验证命令和回报格式。子 Agent 创建成功后，立即使用命令 bd update <beadId> --assignee "<provider>" 将对应 bead 的 assignee 设置为本次执行配置中的完整 provider（包含 model，例如 codex/gpt-5.6-sol），按原字符串传入并在 shell 中正确引用；不要填入 Paseo Agent ID，不要写入 metadata，也不要使用 owner 代替。子 Agent 返回的 Agent ID 仅用于核对 parent、workspace、provider/model 和 settings 是否符合预期。
 4. 子 Agent 只负责自己的 bead，并把完成证据、失败原因、阻塞条件或新增任务建议直接报告给父 Agent。是否更新状态、调整依赖或新增 bead，由父 Agent 决定。
 
 四、推进和收尾
-1. 父 Agent 负责选择执行顺序、等待和汇总子 Agent 结果，并根据真实证据更新 Beads 状态；不要让子 Agent 自行派发兄弟任务或启动后台调度。
-2. 如果发现需要新增工作，先向父 Agent 报告理由和建议内容，由父 Agent 判断是否创建新的 bead，再重新安排依赖。
-3. 本次任务图中的所有子任务完成且父 Agent 验收通过后，收集本次创建的父 bead/epic 和全部子 bead ID，先执行 bd delete <id...> --dry-run 核对删除范围，再执行 bd delete <id...> --force 永久删除这些 Beads。不要使用 --cascade，不要删除任务开始前已有或与本次工作无关的 bead；如果预览包含无关任务，则停止清理并报告。
-4. 最终汇报每个子任务对应的 Agent、执行配置、验证结果、Beads 清理结果、未解决阻塞和后续建议。`;
+1. 父 Agent 每次只派发当前依赖已经满足的子 bead。完成本批子 Agent 创建、assignee 更新和必要说明后立即结束当前轮，将控制权交还用户；不要同步等待子 Agent 执行完，不要调用阻塞式 wait，也不要轮询 list_agents 或 get_agent_status。
+2. 子 Agent 完成、失败或需要权限时，Paseo 会通过 notifyOnFinish 通知并唤醒父 Agent。父 Agent 收到通知后再核验真实证据、更新 Beads 状态，并派发新近解除依赖的下一批任务；如果仍有任务在执行，则再次结束当前轮并继续等待完成通知。
+3. 如果发现需要新增工作，先向父 Agent 报告理由和建议内容，由父 Agent 判断是否创建新的 bead，再重新安排依赖。
+4. 本次任务图中的所有子任务完成且父 Agent 验收通过后，收集本次创建的父 bead/epic 和全部子 bead ID，先执行 bd delete <id...> --dry-run 核对删除范围，再执行 bd delete <id...> --force 永久删除这些 Beads。不要使用 --cascade，不要删除任务开始前已有或与本次工作无关的 bead；如果预览包含无关任务，则停止清理并报告。
+5. 最终汇报每个子任务对应的 Agent、执行配置、验证结果、Beads 清理结果、未解决阻塞和后续建议。`;
 }
 
 function errorMessage(error: unknown) {
@@ -426,12 +434,14 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
       </View>
 
       <View style={styles.requirementSection}>
-        <Text style={styles.requirementLabel}>本次需求（复制提示词时会带入）：</Text>
+        <Text style={styles.requirementLabel}>
+          本次需求（支持多级标题，复制时作为独立原文带入）：
+        </Text>
         <TextInput
           accessibilityLabel="填写本次 Beads 任务需求"
           multiline
           onChangeText={setRequirement}
-          placeholder="请输入希望主 Agent 设计和推进的具体需求"
+          placeholder="可直接粘贴包含一级、二级标题的结构化需求"
           placeholderTextColor={theme.colors.foregroundMuted}
           style={styles.requirementInput}
           value={requirement}

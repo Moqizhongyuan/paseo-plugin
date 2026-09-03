@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Button, Toast, type ToastVariant } from "../../components";
 import {
+  DEFAULT_MEEGO_URL,
   DEFAULT_MR_URL,
   getCurrentBranch,
   getShortcutBinding,
@@ -92,6 +93,40 @@ Claude 子 Agent 2（复核）：
 - 汇总两个 Agent 的评审结论要点，并在你自己的最终回复中明确给出所创建飞书文档的 URL（若文档创建失败，则说明失败原因）。`;
 }
 
+function buildBitsDevTaskPrompt(
+  codeDirectory: string,
+  targetMeegoUrl: string,
+  requirementBranch: string,
+): string {
+  return `请在当前 \`serial-common-monorepo\` 仓库中，一次性完成本需求的 Bits 开发任务创建，并启动标准流程对应的流水线。
+
+任务信息：
+- 需求名称：根据当前 Meego 名称
+- 代码目录：${JSON.stringify(codeDirectory)}
+- Meego：${JSON.stringify(targetMeegoUrl)}
+- 需求分支：${JSON.stringify(requirementBranch)}
+- 目标应用：红果AIGC创作工具平台（aigc-platform）
+- 应用主 SCM：novel_fe/serial/aigc_platform
+- 流程：小说通用-单需求发布流程 / 【小说】标准开发流程
+- 部署环境：仅使用 PPE；自动生成一个具体的 \`ppe_<random>\` 环境，不使用 BOE
+
+执行要求：
+1. 使用项目的 \`serial-bits-dev-task\` 和官方 \`bits-devops-dev-task\` Skill。
+2. 必须根据代码目录 \`apps/aigc-platform\` 显式选择“红果AIGC创作工具平台（aigc-platform）”。
+3. 不得仅根据 monorepo 的 Git remote 套用默认项目，也不得选择 \`playlet-produce\` 或 \`playlet-produce-migrate\`。
+4. 创建前通过应用中心核对目标应用名称和主 SCM；二者必须与上述信息完全一致，否则停止创建并报告。
+5. 如果当前分支不是需求分支，将本需求的提交和工作区改动迁移到需求分支，并设置远端 upstream。
+6. 提交并推送本需求相关的全部改动。不得提交无关改动；仅由本地构建产生的 \`apps/aigc-platform/@mf-types/**\` 变化不要纳入提交，也不要擅自清理。
+7. 本消息明确授权本次执行 \`git commit\`、\`git push\`、创建或迁移需求分支，以及正式创建 Bits 开发任务。不使用 force push，不删除其他分支。
+8. 参数校验后，查询是否已经存在同时匹配该 Meego、需求分支和目标应用的开发任务：
+   - 已存在：不要重复创建，直接回读并返回已有任务。
+   - 不存在：只创建一个新的开发任务。
+9. 本消息同时构成最终参数确认。我明确授权本次 prepare 和 submit 使用 \`BITS_DEV_TASK_NO_CONFIRM=1\`；该授权仅限本次任务。参数齐全后直接创建，不要再次要求我回复“确认创建”。
+10. 如果创建请求超时或结果不明确，必须先查询平台确认是否已经创建，不得直接重复提交。
+11. 创建后必须回读并核对任务名称、Meego、目标应用、主 SCM、需求分支、提交和实际 PPE 环境。只有全部一致时才报告完成。
+12. 最终返回 Bits 链接、任务 ID、目标应用、需求分支、提交、Meego、实际 PPE 和流水线状态。`;
+}
+
 export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAgentPanelProps) {
   const paseo = usePaseo();
   const workspaceDirectory = useWorkspace(workspaceId, ({ directory }) => directory);
@@ -111,14 +146,19 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
   const [draftBranch, setDraftBranch] = useState("");
   const [mrUrl, setMrUrl] = useState(DEFAULT_MR_URL);
   const [draftMrUrl, setDraftMrUrl] = useState(DEFAULT_MR_URL);
+  const [meegoUrl, setMeegoUrl] = useState(DEFAULT_MEEGO_URL);
+  const [draftMeegoUrl, setDraftMeegoUrl] = useState(DEFAULT_MEEGO_URL);
   const [editingBranch, setEditingBranch] = useState(false);
   const [editingMrUrl, setEditingMrUrl] = useState(false);
+  const [editingMeegoUrl, setEditingMeegoUrl] = useState(false);
   const [branchLoading, setBranchLoading] = useState(true);
   const [savingBranch, setSavingBranch] = useState(false);
   const [savingMrUrl, setSavingMrUrl] = useState(false);
+  const [savingMeegoUrl, setSavingMeegoUrl] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
   const [sendingMainSyncPrompt, setSendingMainSyncPrompt] = useState(false);
   const [sendingMrSyncPrompt, setSendingMrSyncPrompt] = useState(false);
+  const [sendingBitsPipelinePrompt, setSendingBitsPipelinePrompt] = useState(false);
   const [creatingPushAgent, setCreatingPushAgent] = useState(false);
   const [creatingReviewManagerAgent, setCreatingReviewManagerAgent] = useState(false);
   const [toast, setToast] = useState<{ message: string; variant: ToastVariant } | null>(null);
@@ -139,6 +179,7 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
     setBranchError(null);
     setEditingBranch(false);
     setEditingMrUrl(false);
+    setEditingMeegoUrl(false);
 
     async function loadBranch() {
       try {
@@ -148,6 +189,9 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
         const loadedMrUrl = stored.mrUrl ?? DEFAULT_MR_URL;
         setMrUrl(loadedMrUrl);
         setDraftMrUrl(loadedMrUrl);
+        const loadedMeegoUrl = stored.meegoUrl ?? DEFAULT_MEEGO_URL;
+        setMeegoUrl(loadedMeegoUrl);
+        setDraftMeegoUrl(loadedMeegoUrl);
 
         if (stored.branch) {
           setGitBranch(stored.branch);
@@ -199,11 +243,14 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
         agentId,
         branch: normalizedBranch,
         mrUrl: mrUrl.trim() || DEFAULT_MR_URL,
+        meegoUrl: meegoUrl.trim() || DEFAULT_MEEGO_URL,
       });
       setGitBranch(saved.branch);
       setDraftBranch(saved.branch);
       setMrUrl(saved.mrUrl);
       setDraftMrUrl(saved.mrUrl);
+      setMeegoUrl(saved.meegoUrl);
+      setDraftMeegoUrl(saved.meegoUrl);
       setEditingBranch(false);
     } catch (cause) {
       setBranchError(errorMessage(cause));
@@ -238,16 +285,61 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
         agentId,
         branch: normalizedBranch,
         mrUrl: normalizedMrUrl,
+        meegoUrl: meegoUrl.trim() || DEFAULT_MEEGO_URL,
       });
       setGitBranch(saved.branch);
       setDraftBranch(saved.branch);
       setMrUrl(saved.mrUrl);
       setDraftMrUrl(saved.mrUrl);
+      setMeegoUrl(saved.meegoUrl);
+      setDraftMeegoUrl(saved.meegoUrl);
       setEditingMrUrl(false);
     } catch (cause) {
       setBranchError(errorMessage(cause));
     } finally {
       setSavingMrUrl(false);
+    }
+  }
+
+  function handleStartEditingMeegoUrl() {
+    if (branchLoading || savingMeegoUrl) return;
+    setDraftMeegoUrl(meegoUrl);
+    setBranchError(null);
+    setEditingMeegoUrl(true);
+  }
+
+  function handleCancelEditingMeegoUrl() {
+    if (savingMeegoUrl) return;
+    setDraftMeegoUrl(meegoUrl);
+    setBranchError(null);
+    setEditingMeegoUrl(false);
+  }
+
+  async function handleSaveMeegoUrl() {
+    const normalizedBranch = gitBranch.trim();
+    const normalizedMeegoUrl = draftMeegoUrl.trim();
+    if (!normalizedBranch || !normalizedMeegoUrl || savingMeegoUrl) return;
+
+    setSavingMeegoUrl(true);
+    setBranchError(null);
+    try {
+      const saved = await persistShortcutBinding({
+        agentId,
+        branch: normalizedBranch,
+        mrUrl: mrUrl.trim() || DEFAULT_MR_URL,
+        meegoUrl: normalizedMeegoUrl,
+      });
+      setGitBranch(saved.branch);
+      setDraftBranch(saved.branch);
+      setMrUrl(saved.mrUrl);
+      setDraftMrUrl(saved.mrUrl);
+      setMeegoUrl(saved.meegoUrl);
+      setDraftMeegoUrl(saved.meegoUrl);
+      setEditingMeegoUrl(false);
+    } catch (cause) {
+      setBranchError(errorMessage(cause));
+    } finally {
+      setSavingMeegoUrl(false);
     }
   }
 
@@ -384,6 +476,39 @@ MR 链接：${JSON.stringify(targetMrUrl)}
       setToast({ message: errorMessage(cause), variant: "error" });
     } finally {
       setSendingMainSyncPrompt(false);
+    }
+  }
+
+  async function handleSendBitsPipelinePrompt() {
+    const codeDirectory = workspaceDirectory?.trim() ?? "";
+    const targetMeegoUrl = meegoUrl.trim();
+    const requirementBranch = gitBranch.trim();
+    if (
+      branchLoading ||
+      !codeDirectory ||
+      !targetMeegoUrl ||
+      targetMeegoUrl === DEFAULT_MEEGO_URL ||
+      !requirementBranch ||
+      sendingBitsPipelinePrompt
+    ) {
+      return;
+    }
+
+    setSendingBitsPipelinePrompt(true);
+    setToast(null);
+    try {
+      await paseo.agents
+        .ref(agentId)
+        .send(buildBitsDevTaskPrompt(codeDirectory, targetMeegoUrl, requirementBranch));
+
+      setToast({
+        message: "已向当前 Agent 发送创建需求 Bits 流水线指令",
+        variant: "success",
+      });
+    } catch (cause) {
+      setToast({ message: errorMessage(cause), variant: "error" });
+    } finally {
+      setSendingBitsPipelinePrompt(false);
     }
   }
 
@@ -542,6 +667,66 @@ MR 链接：${JSON.stringify(targetMrUrl)}
           </Text>
         </Pressable>
       )}
+      {editingMeegoUrl ? (
+        <View style={styles.infoRow}>
+          <Text style={styles.fieldLabel}>Meego 链接：</Text>
+          <TextInput
+            accessibilityLabel="当前 Agent 绑定的 Meego 链接"
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoFocus
+            keyboardType="url"
+            onChangeText={setDraftMeegoUrl}
+            placeholder="请输入 Meego 链接"
+            placeholderTextColor={theme.colors.foregroundMuted}
+            style={styles.branchInput}
+            value={draftMeegoUrl}
+          />
+          <Pressable
+            accessibilityLabel="保存 Meego 链接"
+            accessibilityRole="button"
+            disabled={!draftMeegoUrl.trim() || !gitBranch.trim() || savingMeegoUrl}
+            onPress={() => void handleSaveMeegoUrl()}
+            style={({ pressed }) => [
+              styles.iconButton,
+              pressed && styles.pressed,
+              (!draftMeegoUrl.trim() || !gitBranch.trim() || savingMeegoUrl) && styles.disabled,
+            ]}
+          >
+            <Text accessible={false} style={[styles.iconGlyph, styles.saveGlyph]}>
+              ✓
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel="取消编辑 Meego 链接"
+            accessibilityRole="button"
+            disabled={savingMeegoUrl}
+            onPress={handleCancelEditingMeegoUrl}
+            style={({ pressed }) => [
+              styles.iconButton,
+              pressed && styles.pressed,
+              savingMeegoUrl && styles.disabled,
+            ]}
+          >
+            <Text accessible={false} style={[styles.iconGlyph, styles.cancelGlyph]}>
+              ×
+            </Text>
+          </Pressable>
+        </View>
+      ) : (
+        <Pressable
+          accessibilityLabel="编辑当前 Agent 绑定的 Meego 链接"
+          accessibilityRole="button"
+          disabled={branchLoading}
+          onPress={handleStartEditingMeegoUrl}
+          style={({ pressed }) => [styles.infoRow, pressed && styles.pressed]}
+        >
+          <Text style={styles.fieldLabel}>Meego 链接：</Text>
+          <Text numberOfLines={1} style={styles.infoText}>
+            {branchLoading ? "读取中…" : meegoUrl}
+          </Text>
+        </Pressable>
+      )}
       {editingBranch ? (
         <View style={styles.infoRow}>
           <Text style={styles.fieldLabel}>git branch：</Text>
@@ -632,6 +817,22 @@ MR 链接：${JSON.stringify(targetMrUrl)}
         loading={creatingPushAgent}
         loadingLabel="正在创建 Agent…"
         onPress={() => void handleCreatePushAgent()}
+        style={styles.commandButton}
+        theme={theme}
+      />
+      <Button
+        accessibilityLabel="向当前 Agent 发送创建需求 Bits 开发任务并运行流水线的指令"
+        disabled={
+          branchLoading ||
+          !workspaceDirectory?.trim() ||
+          !gitBranch.trim() ||
+          !meegoUrl.trim() ||
+          meegoUrl.trim() === DEFAULT_MEEGO_URL
+        }
+        label="创建需求 Bits 流水线"
+        loading={sendingBitsPipelinePrompt}
+        loadingLabel="正在发送指令…"
+        onPress={() => void handleSendBitsPipelinePrompt()}
         style={styles.commandButton}
         theme={theme}
       />
