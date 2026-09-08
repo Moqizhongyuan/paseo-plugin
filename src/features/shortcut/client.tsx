@@ -1,10 +1,4 @@
-import {
-  type PluginAgentPanelProps,
-  useAgent,
-  usePaseo,
-  useRpc,
-  useWorkspace,
-} from "@getpaseo/plugin";
+import { type PluginAgentPanelProps, usePaseo, useRpc, useWorkspace } from "@getpaseo/plugin";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Button, Toast, type ToastVariant } from "../../components";
@@ -23,7 +17,7 @@ function errorMessage(error: unknown) {
 // “评审当前 MR”只创建一个 GPT 管理 Agent，由它负责后续编排两个 Claude 子 Agent 与飞书文档。
 // 管理 Agent 固定使用完整 provider/model，并以 full-access 模式运行（它需要创建子 Agent 与飞书文档，
 // 这些是允许的外部写入）；两个 Claude 子 Agent 使用下方固定的实时可用 provider/model 与只读模式。
-const REVIEW_MANAGER_PROVIDER = "codex/gpt-5.6-sol";
+const REVIEW_MANAGER_PROVIDER = "codex/gpt-6-astra";
 const REVIEW_MANAGER_MODE_ID = "full-access";
 const REVIEW_CHILD_PROVIDER = "claude-super-relay/claude-opus-4-8[1m]";
 const REVIEW_CHILD_MODE_ID = "plan";
@@ -163,15 +157,6 @@ function buildTestSubmissionPrompt(targetMeegoUrl: string, targetMrUrl: string):
 export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAgentPanelProps) {
   const paseo = usePaseo();
   const workspaceDirectory = useWorkspace(workspaceId, ({ directory }) => directory);
-  const currentAgentConfig = useAgent(
-    agentId,
-    ({ provider, model, currentModeId, thinkingOptionId }) => ({
-      provider,
-      model,
-      currentModeId,
-      thinkingOptionId,
-    }),
-  );
   const loadShortcutBinding = useRpc(getShortcutBinding);
   const loadCurrentBranch = useRpc(getCurrentBranch);
   const persistShortcutBinding = useRpc(saveShortcutBinding);
@@ -380,22 +365,16 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
 
   async function handleCreatePushAgent() {
     const targetBranch = gitBranch.trim();
-    if (!targetBranch || !currentAgentConfig || creatingPushAgent) return;
+    if (!targetBranch || creatingPushAgent) return;
 
     setCreatingPushAgent(true);
     setToast(null);
     try {
-      const provider = currentAgentConfig.model
-        ? `${currentAgentConfig.provider}/${currentAgentConfig.model}`
-        : currentAgentConfig.provider;
-
       await paseo.workspaces.ref(workspaceId).agents.create({
         config: {
-          provider,
-          ...(currentAgentConfig.currentModeId ? { modeId: currentAgentConfig.currentModeId } : {}),
-          ...(currentAgentConfig.thinkingOptionId
-            ? { thinkingOptionId: currentAgentConfig.thinkingOptionId }
-            : {}),
+          provider: "codex/gpt-6-astra",
+          modeId: "full-access",
+          thinkingOptionId: "low",
         },
         title: "提交并推送代码",
         prompt: `请在当前 Workspace 中完成以下任务：
@@ -433,7 +412,11 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
       // 只创建一个 GPT 管理 Agent（新 tab，不绑定当前面板 agentId 为 parent）。
       // 后续的双 Claude 子 Agent 编排与飞书文档由这个管理 Agent 异步负责，插件不参与等待/转发。
       await paseo.workspaces.ref(workspaceId).agents.create({
-        config: { provider: REVIEW_MANAGER_PROVIDER, modeId: REVIEW_MANAGER_MODE_ID },
+        config: {
+          provider: REVIEW_MANAGER_PROVIDER,
+          modeId: REVIEW_MANAGER_MODE_ID,
+          thinkingOptionId: "high",
+        },
         title: "MR Code Review 管理",
         labels: { shortcut: "mr-review", role: "review-manager" },
         prompt: buildReviewManagerPrompt(targetMrUrl, targetBranch, workspaceId),
@@ -456,7 +439,6 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
       branchLoading ||
       !targetMeegoUrl ||
       targetMeegoUrl === DEFAULT_MEEGO_URL ||
-      !currentAgentConfig ||
       testSubmissionCreationInFlight.current
     ) {
       return;
@@ -466,18 +448,13 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
     setCreatingTestSubmissionAgent(true);
     setToast(null);
     try {
-      const provider = currentAgentConfig.model
-        ? `${currentAgentConfig.provider}/${currentAgentConfig.model}`
-        : currentAgentConfig.provider;
       const targetMrUrl = mrUrl.trim();
 
       await paseo.workspaces.ref(workspaceId).agents.create({
         config: {
-          provider,
-          ...(currentAgentConfig.currentModeId ? { modeId: currentAgentConfig.currentModeId } : {}),
-          ...(currentAgentConfig.thinkingOptionId
-            ? { thinkingOptionId: currentAgentConfig.thinkingOptionId }
-            : {}),
+          provider: "codex/gpt-6-astra",
+          modeId: "full-access",
+          thinkingOptionId: "high",
         },
         title: "根据测试计划补全提测文档",
         labels: { shortcut: "test-submission" },
@@ -893,7 +870,7 @@ MR 链接：${JSON.stringify(targetMrUrl)}
       />
       <Button
         accessibilityLabel="创建 Agent 提交并推送当前代码"
-        disabled={branchLoading || !gitBranch.trim() || !currentAgentConfig}
+        disabled={branchLoading || !gitBranch.trim()}
         label="提交并推送当前代码"
         loading={creatingPushAgent}
         loadingLabel="正在创建 Agent…"
@@ -931,12 +908,7 @@ MR 链接：${JSON.stringify(targetMrUrl)}
       />
       <Button
         accessibilityLabel="创建 Agent 根据测试计划补全提测文档"
-        disabled={
-          branchLoading ||
-          !currentAgentConfig ||
-          !meegoUrl.trim() ||
-          meegoUrl.trim() === DEFAULT_MEEGO_URL
-        }
+        disabled={branchLoading || !meegoUrl.trim() || meegoUrl.trim() === DEFAULT_MEEGO_URL}
         label="根据测试计划补全提测文档"
         loading={creatingTestSubmissionAgent}
         loadingLabel="正在创建 Agent…"
