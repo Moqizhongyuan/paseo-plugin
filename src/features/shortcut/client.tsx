@@ -5,7 +5,7 @@ import {
   useRpc,
   useWorkspace,
 } from "@getpaseo/plugin";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Button, Toast, type ToastVariant } from "../../components";
 import {
@@ -127,6 +127,39 @@ function buildBitsDevTaskPrompt(
 12. 最终返回 Bits 链接、任务 ID、目标应用、需求分支、提交、Meego、实际 PPE 和流水线状态。`;
 }
 
+function buildTestSubmissionPrompt(targetMeegoUrl: string, targetMrUrl: string): string {
+  return `请根据本需求的测试计划补全提测文档，由你这一个 Agent 直接执行，不创建其他 Agent 或 Beads 任务图。
+
+任务信息：
+- Meego 链接：${JSON.stringify(targetMeegoUrl)}
+- 面板绑定的 MR 地址（仅作检索线索，需核对属于该 Meego）：${JSON.stringify(targetMrUrl)}
+- 提测文档模板：https://bytedance.larkoffice.com/wiki/UTkywASFriMHOJkqTvicjmZXnkb
+
+一、确定文档与资料
+1. 使用适用的 Meego 查询工具，以及 lark-doc、lark-drive Skill，读取上述 Meego 的详情、关联文档、附件和相关评论。只处理该需求，不根据模板示例推断业务。
+2. 必须直接使用上述链接对应的飞书模板生成“需求名称-提测文档”，这是强制要求。已核实飞书官方文档 https://open.feishu.cn/document/docs/drive-v1/file/create-cloud-document 明确指定“复制文件”接口作为“基于模板创建文档”的入口：POST /open-apis/drive/v1/files/:file_token/copy，现有 CLI 已提供 lark-cli drive files copy。按 lark-drive Skill 先将上述 Wiki 链接解析为实际文档 token，确认源文件类型和目标文件夹，再调用该接口生成文档；不得把 Wiki 节点 token 直接当作文件 token。若该接口对当前模板不可用，必须使用 web-access Skill 在已登录的浏览器中打开上述模板网页，点击右上角“使用该模板”，完成创建并获取实际生成的文档链接。不得通过读取正文后重新创建、手写 Markdown/XML 来替代直接使用模板。若本需求已有由该模板生成的提测文档，经核实后可继续补全，避免重复创建；有多个无法区分的目标文档时先确认，不猜选。
+   创建后读取实际生成的文档，核对模板原有的章节、表格、图片及样式均被保留，再填写指定内容；模板源文档本身不得修改。若网页入口也不可用或权限不足，报告实际阻塞并等待处理，不得自行改用其他模板或重建文档。
+3. 仅补全这些字段：Meego链接/需求文档、UX稿、埋点文档、技术方案文档、MR地址、测试计划。尽可能从 Meego 获取真实可点击链接；MR 可使用经核对属于该需求的面板绑定地址。找不到的字段留空，不填写“未找到”等占位文字，不编造链接，不清空已有的有效信息。
+4. 测试计划必须实际读取完整内容；有嵌入表格、多维表格或 Bits 用例时，使用对应 Skill 展开并读取全部相关用例及分页。找不到或无权限读取测试计划时，先完成可确认的资料字段，并明确报告自测阻塞，不能自行生成计划替代原计划。
+
+二、填写 PPE 环境
+1. 从已核对的 MR 描述、评论和关联部署记录获取真实 PPE 环境，并确认与该 MR 的部署版本对应。在模板的“PPE环境”中分别填写已确认的服务端环境和前端环境，同时保留来源链接。
+2. 找不到的环境留空；不得使用模板中的 ppe_test_xxx、随机环境或从分支名推测。环境无法确认或不可访问时，不把其他环境的结果写成 PPE 自测。
+
+三、按测试计划完成自测演示
+1. 先将测试计划全部展开为逐项清单，保留原编号或标题、前置条件、步骤和预期结果；覆盖所有测试计划条目，包括异常、边界、权限和不同角色场景，不只选主流程。
+2. 在上述 MR 对应的 PPE 中逐项执行并记录实际结果。Mac 上真实登录态及多环境插件交互必须使用 web-access Skill，通过 CDP 复用 Chrome，并在自己的标签页内操作。读取团队“E2E录屏交付”操作指引，使用可用的真实录屏能力记录操作过程；不得用静态图片拼接冒充录屏。
+3. 可按场景分段录屏；将可播放的录屏附件或可访问链接放入“自测演示 / 录屏”，标注每段对应的测试计划条目及必要的时间位置。复核视频确实包含操作和结果。
+4. 在“自测演示 / 截屏”原有的“场景 / 功能说明 / 截图”表格中按需增加行。场景对应测试计划编号或标题；功能说明记录关键步骤、预期、实际结果与通过/失败/阻塞状态；截图单元格嵌入关键操作、状态和结果的真实截图，不能只写本地路径或文字说明。
+5. 某条用例失败或受权限、账号、数据、环境影响时，如实记录原因并继续其余可执行用例，不漏记，也不宣称全部通过。若需 Mock 辅助展示，必须明确标注，不能替代真实 PPE 自测结论。
+6. 只操作必要的测试数据，不改业务代码、不提交或推送代码、不执行发布。涉及生产数据、付费或不可逆删除的用例先确认授权，未执行的条目记录阻塞原因。
+
+四、范围与交付
+1. 只修改上述六个资料字段、PPE 环境，以及自测演示中的录屏和截屏表格；其他章节保留原样，不额外补写。
+2. 写入后重新读取提测文档，核对字段、表格内图片、录屏可访问性，以及所有测试计划条目与执行结果的一一对应关系。
+3. 最终返回提测文档链接、测试计划总数和通过/失败/阻塞/未执行数量、录屏链接、缺失资料及未完成原因。只有全部条目实际执行且证据齐全时，才可报告已完成全部自测覆盖。`;
+}
+
 export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAgentPanelProps) {
   const paseo = usePaseo();
   const workspaceDirectory = useWorkspace(workspaceId, ({ directory }) => directory);
@@ -161,6 +194,8 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
   const [sendingBitsPipelinePrompt, setSendingBitsPipelinePrompt] = useState(false);
   const [creatingPushAgent, setCreatingPushAgent] = useState(false);
   const [creatingReviewManagerAgent, setCreatingReviewManagerAgent] = useState(false);
+  const [creatingTestSubmissionAgent, setCreatingTestSubmissionAgent] = useState(false);
+  const testSubmissionCreationInFlight = useRef(false);
   const [toast, setToast] = useState<{ message: string; variant: ToastVariant } | null>(null);
 
   useEffect(() => {
@@ -412,6 +447,52 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
       setToast({ message: errorMessage(cause), variant: "error" });
     } finally {
       setCreatingReviewManagerAgent(false);
+    }
+  }
+
+  async function handleCreateTestSubmissionAgent() {
+    const targetMeegoUrl = meegoUrl.trim();
+    if (
+      branchLoading ||
+      !targetMeegoUrl ||
+      targetMeegoUrl === DEFAULT_MEEGO_URL ||
+      !currentAgentConfig ||
+      testSubmissionCreationInFlight.current
+    ) {
+      return;
+    }
+
+    testSubmissionCreationInFlight.current = true;
+    setCreatingTestSubmissionAgent(true);
+    setToast(null);
+    try {
+      const provider = currentAgentConfig.model
+        ? `${currentAgentConfig.provider}/${currentAgentConfig.model}`
+        : currentAgentConfig.provider;
+      const targetMrUrl = mrUrl.trim();
+
+      await paseo.workspaces.ref(workspaceId).agents.create({
+        config: {
+          provider,
+          ...(currentAgentConfig.currentModeId ? { modeId: currentAgentConfig.currentModeId } : {}),
+          ...(currentAgentConfig.thinkingOptionId
+            ? { thinkingOptionId: currentAgentConfig.thinkingOptionId }
+            : {}),
+        },
+        title: "根据测试计划补全提测文档",
+        labels: { shortcut: "test-submission" },
+        prompt: buildTestSubmissionPrompt(
+          targetMeegoUrl,
+          targetMrUrl === DEFAULT_MR_URL ? "" : targetMrUrl,
+        ),
+      });
+
+      setToast({ message: "已创建补全提测文档 Agent", variant: "success" });
+    } catch (cause) {
+      setToast({ message: errorMessage(cause), variant: "error" });
+    } finally {
+      testSubmissionCreationInFlight.current = false;
+      setCreatingTestSubmissionAgent(false);
     }
   }
 
@@ -845,6 +926,21 @@ MR 链接：${JSON.stringify(targetMrUrl)}
         loading={creatingReviewManagerAgent}
         loadingLabel="正在创建管理 Agent…"
         onPress={() => void handleCreateReviewManagerAgent()}
+        style={styles.commandButton}
+        theme={theme}
+      />
+      <Button
+        accessibilityLabel="创建 Agent 根据测试计划补全提测文档"
+        disabled={
+          branchLoading ||
+          !currentAgentConfig ||
+          !meegoUrl.trim() ||
+          meegoUrl.trim() === DEFAULT_MEEGO_URL
+        }
+        label="根据测试计划补全提测文档"
+        loading={creatingTestSubmissionAgent}
+        loadingLabel="正在创建 Agent…"
+        onPress={() => void handleCreateTestSubmissionAgent()}
         style={styles.commandButton}
         theme={theme}
       />
