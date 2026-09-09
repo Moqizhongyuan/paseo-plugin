@@ -143,7 +143,10 @@ test("Huatuo command creates one agent in the current workspace with the bound M
   assert.ok(prompt.includes(`MR 链接：${JSON.stringify(url)}`));
   assert.equal((prompt.match(/^\d+\. /gm) || []).length, 10);
   for (const requirement of [
-    "web-access Skill",
+    "所有浏览器操作都必须走 GPT 插件",
+    "禁止使用 CDP、CDP Proxy、远程调试端口",
+    "不得在插件不可用时自动回退到 CDP",
+    "若 GPT 插件入口不可用或未连接，报告阻塞并等待我处理",
     "0/0 的未插桩文件不作为补测目标",
     "立即停止后续补测",
     "不自行修复",
