@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { z } from "zod";
 import {
   executionAgentConfig,
@@ -67,16 +68,6 @@ function commandFailureMessage(cause: unknown, args: readonly string[]) {
   const stderr = typeof record.stderr === "string" ? record.stderr.trim() : "";
   const message = stderr || errorMessage(record.message ?? cause);
   return truncate(`bd ${args.join(" ")}：${message}`, MAX_ERROR_LENGTH);
-}
-
-function isNoBeadsWorkspaceError(cause: unknown) {
-  const message = errorMessage(cause).toLowerCase();
-  return (
-    message.includes("no active beads workspace") ||
-    message.includes("not a beads workspace") ||
-    message.includes("no beads workspace") ||
-    message.includes("no beads database")
-  );
 }
 
 function isMissingBeadError(cause: unknown) {
@@ -157,10 +148,16 @@ function normalizeIssue(value: unknown): BeadsApiIssue | null {
 
 async function runBdJson(directory: string, args: readonly string[]): Promise<unknown> {
   try {
-    const result = await execFileAsync("bd", args, {
+    // The plugin process must not leak another agent's database overrides into bd.
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !/^(BEADS_|DOLT_)/.test(key)),
+    );
+    const result = await execFileAsync("bd", ["--readonly", ...args], {
       cwd: directory,
+      env: { ...env, BEADS_DIR: join(directory, ".beads") },
       encoding: "utf8",
       maxBuffer: MAX_EXEC_BUFFER,
+      timeout: 15_000,
     });
     const stdout = typeof result.stdout === "string" ? result.stdout.trim() : "";
     if (!stdout) return [];
@@ -187,27 +184,108 @@ async function ensureDirectory(directory: string) {
   if (!directoryStat.isDirectory()) throw new Error("当前工作目录不是目录");
 }
 
-async function readBeadList(directory: string) {
+async function resolveMainAgentId(agentId: string, paseo: PluginHandlerContext["paseo"]) {
+  const visited = new Set<string>();
+  let currentId = agentId;
+  while (visited.size < 64) {
+    getBeadsTaskListContract.input.parse({ agentId: currentId });
+    if (visited.has(currentId)) throw new Error("Agent 父级关系存在循环，无法定位任务库");
+    visited.add(currentId);
+    const result = await paseo.agents.ref(currentId).refresh();
+    if (!result?.agent || result.agent.id !== currentId) {
+      throw new Error(`无法读取 Agent ${currentId}，不能确定所属主 Agent`);
+    }
+    // Public Paseo protocol: getParentAgentIdFromLabels uses this reserved label.
+    const parentId = result.agent.labels?.["paseo.parent-agent-id"]?.trim();
+    if (!parentId) return currentId;
+    currentId = parentId;
+  }
+  throw new Error("Agent 父级关系过深，无法定位任务库");
+}
+
+async function assertContainedPath(base: string, target: string) {
+  const canonical = await realpath(target);
+  const pathFromBase = relative(base, canonical);
+  if (pathFromBase === ".." || pathFromBase.startsWith("../") || isAbsolute(pathFromBase)) {
+    throw new Error("Beads 数据库路径指向主 Agent 专属目录之外，已停止查询");
+  }
+  return canonical;
+}
+
+async function hasAgentDatabase(directory: string) {
+  const beadsDirectory = join(directory, ".beads");
   try {
-    const raw = await runBdJson(directory, [
-      "list",
-      "--all",
-      "--flat",
-      "--limit",
-      "0",
-      "--no-pager",
-      "--json",
-    ]);
-    return {
-      available: true,
-      issues: extractRecords(raw)
-        .map(normalizeIssue)
-        .filter((issue): issue is BeadsApiIssue => issue !== null),
-    };
+    await lstat(beadsDirectory);
   } catch (cause) {
-    if (isNoBeadsWorkspaceError(cause)) return { available: false, issues: [] };
+    if (isMissingFile(cause)) return false;
     throw cause;
   }
+  // Resolve ai-native itself, but do not accept redirects/symlinks to another agent's store.
+  if ((await realpath(beadsDirectory)) !== beadsDirectory) {
+    throw new Error("Beads 专属目录包含重定向软链，已停止查询");
+  }
+  await ensureDirectory(beadsDirectory);
+  try {
+    await lstat(join(beadsDirectory, "redirect"));
+    throw new Error("Beads 专属目录存在 redirect，已停止查询");
+  } catch (cause) {
+    if (!isMissingFile(cause)) throw cause;
+  }
+  const metadata: unknown = JSON.parse(
+    await readFile(join(beadsDirectory, "metadata.json"), "utf8"),
+  );
+  if (!isRecord(metadata) || (metadata.dolt_mode && metadata.dolt_mode !== "embedded")) {
+    throw new Error("任务面板只读取主 Agent 的独立 embedded Beads 数据库");
+  }
+  // Validate explicit overrides, but let bd resolve its version-specific default storage.
+  const dataDirectory =
+    stringField(metadata, "dolt_data_dir") ||
+    (typeof metadata.database === "string" && isAbsolute(metadata.database)
+      ? metadata.database
+      : null);
+  if (dataDirectory) {
+    await assertContainedPath(beadsDirectory, resolve(beadsDirectory, dataDirectory));
+  }
+  const context = await runBdJson(directory, ["context", "--json"]);
+  if (
+    !isRecord(context) ||
+    context.beads_dir !== beadsDirectory ||
+    context.is_redirected ||
+    context.dolt_mode !== "embedded" ||
+    context.server_host ||
+    context.server_port ||
+    context.proxied_dir
+  ) {
+    throw new Error("Beads 实际数据库位置或后端与主 Agent 专属库不一致");
+  }
+  if (typeof context.data_dir === "string" && context.data_dir) {
+    await assertContainedPath(beadsDirectory, resolve(beadsDirectory, context.data_dir));
+  }
+  const location = await runBdJson(directory, ["where", "--json"]);
+  if (
+    !isRecord(location) ||
+    location.path !== beadsDirectory ||
+    typeof location.database_path !== "string"
+  ) {
+    throw new Error("无法确认 Beads 实际数据库路径");
+  }
+  await assertContainedPath(beadsDirectory, location.database_path);
+  return true;
+}
+
+async function readBeadList(directory: string) {
+  const raw = await runBdJson(directory, [
+    "list",
+    "--all",
+    "--flat",
+    "--limit",
+    "0",
+    "--no-pager",
+    "--json",
+  ]);
+  return extractRecords(raw)
+    .map(normalizeIssue)
+    .filter((issue): issue is BeadsApiIssue => issue !== null);
 }
 
 async function readBeadDetails(directory: string, ids: readonly string[]) {
@@ -223,7 +301,7 @@ async function readBeadDetails(directory: string, ids: readonly string[]) {
       }
     } catch (cause) {
       // A bead can disappear between list and show. Keep the list snapshot in that case.
-      if (!isNoBeadsWorkspaceError(cause) && !isMissingBeadError(cause)) throw cause;
+      if (!isMissingBeadError(cause)) throw cause;
     }
   }
   return details;
@@ -268,12 +346,21 @@ async function writeAgentConfigs(configs: AgentConfigs) {
   await writeFile(agentConfigsFile, `${JSON.stringify(configs, null, 2)}\n`, "utf8");
 }
 
-export async function getBeadsTaskList(input: z.infer<typeof getBeadsTaskListContract.input>) {
-  await ensureDirectory(input.directory);
+export async function getBeadsTaskList(
+  input: z.infer<typeof getBeadsTaskListContract.input>,
+  { paseo }: PluginHandlerContext,
+) {
+  let mainAgentId: string | null = null;
+  let beadsDirectory: string | null = null;
   try {
-    const listed = await readBeadList(input.directory);
-    if (!listed.available) {
+    mainAgentId = await resolveMainAgentId(input.agentId, paseo);
+    const sourceRoot = await realpath(join(homedir(), "ai-native"));
+    const directory = join(sourceRoot, "personal", "agent-state", mainAgentId, "beads");
+    beadsDirectory = join(directory, ".beads");
+    if (!(await hasAgentDatabase(directory))) {
       return {
+        mainAgentId,
+        beadsDirectory,
         beadsAvailable: false,
         tasks: [],
         lastError: null,
@@ -281,11 +368,12 @@ export async function getBeadsTaskList(input: z.infer<typeof getBeadsTaskListCon
       };
     }
 
+    const listed = await readBeadList(directory);
     const details = await readBeadDetails(
-      input.directory,
-      listed.issues.map((issue) => issue.id),
+      directory,
+      listed.map((issue) => issue.id),
     );
-    const tasks = listed.issues.map((issue) => {
+    const tasks = listed.map((issue) => {
       const detailedIssue = details.get(issue.id);
       return taskSnapshot(
         detailedIssue
@@ -297,6 +385,8 @@ export async function getBeadsTaskList(input: z.infer<typeof getBeadsTaskListCon
       );
     });
     return {
+      mainAgentId,
+      beadsDirectory,
       beadsAvailable: true,
       tasks,
       lastError: null,
@@ -304,6 +394,8 @@ export async function getBeadsTaskList(input: z.infer<typeof getBeadsTaskListCon
     };
   } catch (cause) {
     return {
+      mainAgentId,
+      beadsDirectory,
       beadsAvailable: true,
       tasks: [],
       lastError: truncate(errorMessage(cause), MAX_ERROR_LENGTH),

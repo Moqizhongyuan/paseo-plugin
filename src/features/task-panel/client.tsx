@@ -1,5 +1,5 @@
 import { type PluginAgentPanelProps, useAgent, useRpc, useWorkspace } from "@getpaseo/plugin";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Clipboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Card, Toast, type ToastVariant } from "../../components";
 import { AgentConfigPanel } from "./agent-config";
@@ -68,7 +68,7 @@ ${normalizedRequirement}
 ${requirementSection}
 
 二、设计 Beads
-1. 先读取当前工作区已有的 Beads 和依赖关系（例如使用 bd list、bd show），理解已有任务后再修改，避免重复创建。
+1. 先读取 x-beads-orchestrator Skill，按真实主 Agent ID 绑定独立数据库：mainBeadsRoot = <本机 ai-native source 真实绝对路径>/personal/agent-state/<主Agent ID>/beads，mainBeadsDir = <mainBeadsRoot>/.beads。首次查询前检查该精确目录；不存在才按 Skill 初始化，已有库异常时停止，不覆盖重建。恢复会话及切换 Worktree 都复用原库，不回退到仓库共享库。后续每条 bd 命令必须显式携带 BEADS_DIR="<mainBeadsDir>" 并使用 -C "<mainBeadsRoot>"，将占位符替换为已核验的绝对路径。先用 BEADS_DIR="<mainBeadsDir>" bd --readonly -C "<mainBeadsRoot>" list --all --json 和同库 show 读取已有任务及依赖，避免重复创建。
 2. 将用户目标拆成一个清晰的父 bead/epic，以及粒度适中、可以独立验收的子 bead。每个子 bead 都写明目标、背景、允许范围、禁止范围、完成标准、验证命令和阻塞条件。
 3. 显式建立依赖关系、优先级和执行顺序。不要用任务标题或编号猜测依赖，也不要覆盖与本次目标无关的已有 bead。
 4. 先向用户或当前会话说明任务图；信息足够时直接按依赖顺序推进，不为了形式拆出没有独立价值的子任务。
@@ -78,14 +78,14 @@ ${configSection}
 
 1. 使用 Paseo agent-scoped MCP create_agent 创建真正的子 Agent，让 Paseo 保留父子关系，并为每个子 Agent 显式设置 notifyOnFinish: true；不要使用脚本、定时任务或插件调度器代替父 Agent 编排。
 2. 将上面的完整 provider/model 传给 create_agent.provider，并将非空的 modeId、thinkingOptionId 放入 create_agent.settings。配置中的空值要省略，不要自行发明值。
-3. 每个子 Agent 对应一个明确的子 bead，在 initialPrompt 中带上 bead ID、目标、范围、完成标准、验证命令和回报格式。子 Agent 创建成功后，立即使用命令 bd update <beadId> --assignee "<provider>" 将对应 bead 的 assignee 设置为本次执行配置中的完整 provider（包含 model，例如 codex/gpt-5.6-sol），按原字符串传入并在 shell 中正确引用；不要填入 Paseo Agent ID，不要写入 metadata，也不要使用 owner 代替。子 Agent 返回的 Agent ID 仅用于核对 parent、workspace、provider/model 和 settings 是否符合预期。
-4. 子 Agent 只负责自己的 bead，并把完成证据、失败原因、阻塞条件或新增任务建议直接报告给父 Agent。是否更新状态、调整依赖或新增 bead，由父 Agent 决定。
+3. 每个子 Agent 对应一个明确的子 bead，在 initialPrompt 中带上主 Agent ID、mainBeadsRoot、mainBeadsDir、bead ID、目标、范围、完成标准、验证命令和回报格式。子 Agent 创建成功后，立即使用命令 BEADS_DIR="<mainBeadsDir>" bd -C "<mainBeadsRoot>" update <beadId> --assignee "<provider>" 将对应 bead 的 assignee 设置为本次执行配置中的完整 provider/model，按原字符串传入并在 shell 中正确引用；不要填入 Paseo Agent ID，不要写入 metadata，也不要使用 owner 代替。子 Agent 返回的 Agent ID 仅用于核对 parent、workspace、provider/model 和 settings 是否符合预期。
+4. 子 Agent 只负责自己的 bead，使用父级指定的 BEADS_DIR 和 --readonly 查询；不得按自己的 Agent ID 新建库。把完成证据、失败原因、阻塞条件或新增任务建议直接报告给父 Agent。是否更新状态、调整依赖或新增 bead，由父 Agent 决定。
 
 四、推进和收尾
 1. 父 Agent 每次只派发当前依赖已经满足的子 bead。完成本批子 Agent 创建、assignee 更新和必要说明后立即结束当前轮，将控制权交还用户；不要同步等待子 Agent 执行完，不要调用阻塞式 wait，也不要轮询 list_agents 或 get_agent_status。
 2. 子 Agent 完成、失败或需要权限时，Paseo 会通过 notifyOnFinish 通知并唤醒父 Agent。父 Agent 收到通知后再核验真实证据、更新 Beads 状态，并派发新近解除依赖的下一批任务；如果仍有任务在执行，则再次结束当前轮并继续等待完成通知。
 3. 如果发现需要新增工作，先向父 Agent 报告理由和建议内容，由父 Agent 判断是否创建新的 bead，再重新安排依赖。
-4. 本次任务图中的所有子任务完成且父 Agent 验收通过后，收集本次创建的父 bead/epic 和全部子 bead ID，先执行 bd delete <id...> --dry-run 核对删除范围，再执行 bd delete <id...> --force 永久删除这些 Beads。不要使用 --cascade，不要删除任务开始前已有或与本次工作无关的 bead；如果预览包含无关任务，则停止清理并报告。
+4. 本次任务图中的所有子任务完成且父 Agent 验收通过后，收集本次创建的父 bead/epic 和全部子 bead ID，先执行 BEADS_DIR="<mainBeadsDir>" bd -C "<mainBeadsRoot>" delete <id...> --dry-run 核对删除范围，再执行 BEADS_DIR="<mainBeadsDir>" bd -C "<mainBeadsRoot>" delete <id...> --force 永久删除这些 Beads。不要使用 --cascade，不要删除任务开始前已有或与本次工作无关的 bead；如果预览包含无关任务，则停止清理并报告。回读确认本次创建的 ID 全部不存在，保留空数据库供恢复会话使用。
 5. 最终汇报每个子任务对应的 Agent、执行配置、验证结果、Beads 清理结果、未解决阻塞和后续建议。`;
 }
 
@@ -130,12 +130,18 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
       thinkingOptionId: currentAgent.thinkingOptionId,
     };
   }, [currentAgent]);
-  const [snapshot, setSnapshot] = useState<BeadsTaskList | null>(null);
+  const [storedSnapshot, setSnapshot] = useState<BeadsTaskList | null>(null);
+  const [resultAgentId, setResultAgentId] = useState<string | null>(null);
+  const activeAgentId = useRef(agentId);
+  activeAgentId.current = agentId;
+  const requestVersion = useRef(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [requirement, setRequirement] = useState("");
   const [copyingPrompt, setCopyingPrompt] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [storedError, setError] = useState<string | null>(null);
+  const snapshot = resultAgentId === agentId ? storedSnapshot : null;
+  const error = resultAgentId === agentId ? storedError : null;
   const [toast, setToast] = useState<{ message: string; variant: ToastVariant } | null>(null);
 
   const styles = useMemo(
@@ -360,43 +366,52 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
 
   const refreshTasks = useCallback(
     async (initial = false) => {
-      if (!workspaceDirectory) {
-        setSnapshot(null);
-        setError(null);
-        setLoading(false);
-        return;
-      }
-
+      const version = ++requestVersion.current;
+      const isCurrent = () =>
+        version === requestVersion.current && activeAgentId.current === agentId;
       if (initial) setLoading(true);
       else setRefreshing(true);
       setError(null);
       try {
-        const nextSnapshot = await loadTaskList({ directory: workspaceDirectory });
+        const nextSnapshot = await loadTaskList({ agentId });
+        if (!isCurrent()) return;
+        setResultAgentId(agentId);
         setSnapshot(nextSnapshot);
         setError(nextSnapshot.lastError);
       } catch (cause) {
+        if (!isCurrent()) return;
+        setResultAgentId(agentId);
+        setSnapshot(null);
         setError(errorMessage(cause));
       } finally {
-        if (initial) setLoading(false);
-        else setRefreshing(false);
+        if (isCurrent()) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
-    [loadTaskList, workspaceDirectory],
+    [agentId, loadTaskList],
   );
 
   useEffect(() => {
     setSnapshot(null);
     void refreshTasks(true);
+    return () => {
+      requestVersion.current += 1;
+    };
   }, [refreshTasks]);
 
   const taskCount = snapshot?.tasks.length ?? 0;
-  const listStatus = loading
+  const loadingTasks = loading || resultAgentId !== agentId;
+  const listStatus = loadingTasks
     ? "正在读取任务"
     : refreshing
       ? "正在刷新"
-      : snapshot?.beadsAvailable
-        ? `共 ${taskCount} 项`
-        : "当前目录未初始化 Beads";
+      : error
+        ? "读取失败"
+        : snapshot?.beadsAvailable
+          ? `共 ${taskCount} 项`
+          : "主 Agent 未初始化 Beads";
 
   return (
     <View style={styles.screen}>
@@ -457,15 +472,18 @@ export function TaskPanel({ theme, layout, agentId, workspaceId }: PluginAgentPa
           </Text>
           <Text style={styles.listStatus}>{listStatus}</Text>
         </View>
+        {snapshot?.mainAgentId ? (
+          <Text style={styles.taskMeta}>所属主 Agent：{snapshot.mainAgentId}</Text>
+        ) : null}
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
         <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
           {taskCount === 0 ? (
             <Card theme={theme} style={styles.emptyCard}>
-              <Text style={styles.emptyTitle}>{loading ? "正在读取任务" : "暂无任务"}</Text>
+              <Text style={styles.emptyTitle}>{loadingTasks ? "正在读取任务" : "暂无任务"}</Text>
               <Text style={styles.emptyDescription}>
                 {snapshot && !snapshot.beadsAvailable
-                  ? "当前工作目录还没有可用的 Beads 工作区"
+                  ? "所属主 Agent 尚未初始化专属 Beads 数据库；面板不会自动创建或读取共享库"
                   : "当前没有可展示的 Beads 任务"}
               </Text>
             </Card>

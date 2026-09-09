@@ -154,6 +154,52 @@ function buildTestSubmissionPrompt(targetMeegoUrl: string, targetMrUrl: string):
 3. 最终返回提测文档链接、测试计划总数和通过/失败/阻塞/未执行数量、录屏链接、缺失资料及未完成原因。只有全部条目实际执行且证据齐全时，才可报告已完成全部自测覆盖。`;
 }
 
+function buildHuatuoCoveragePrompt(targetMrUrl: string): string {
+  return `请根据以下 MR 链接，在我已登录的浏览器中进行补测，提高华佗增量代码覆盖率，同时验证功能是否正常。
+
+MR 链接：${JSON.stringify(targetMrUrl)}
+
+执行要求：
+
+1. 自动确认测试对象
+从 MR 或关联 Bits 开发任务查询真实的源分支、最新提交、PPE 环境、华佗报告和覆盖率门禁。不要根据历史或名称猜测；只有信息无法唯一确定时才问我。
+
+2. 使用真实 PPE 环境
+使用 web-access Skill 连接我日常使用且已登录的浏览器，确认页面命中本次 PPE 和对应代码版本。不得用本地开发环境、其他泳道或其他版本替代。
+
+3. 按未覆盖代码设计操作
+完整盘点报告中“已插桩但未覆盖”的代码，结合源码和已有测试计划，明确对应页面、操作入口、触发条件和预期结果。0/0 的未插桩文件不作为补测目标。
+
+4. 真实操作并同步验收
+通过页面点击、输入、滚动等真实交互触发代码，同时检查页面展示、交互、请求结果及数据变化是否符合预期。不得只为了执行代码而忽略功能问题。
+
+5. 发现问题立即停止并上报
+一旦发现页面或业务异常，立即停止后续补测，不继续追求覆盖率、不自行修复。保留现场，及时向我报告：
+- 页面地址、PPE 环境和代码版本；
+- 复现步骤；
+- 预期结果与实际结果；
+- 截图及可获取的控制台、请求错误信息，敏感信息须脱敏；
+- 是否产生数据改动。
+等待我决定后再继续。仅在安全且不会破坏异常证据时清理临时数据。
+
+6. 控制测试副作用
+优先使用低风险、可恢复的场景。允许对明确的测试数据进行临时编辑和保存，完成后恢复原值并回读确认。删除、退出团队、权限变更、付费或 AI 生成等操作必须另行征得我的确认。不得影响其他人的业务数据。
+
+7. 不伪造覆盖结果
+不修改业务代码、不直接调用内部函数、不篡改覆盖率数据、不擅自添加豁免。无法通过正常 UI 触发的防御分支，说明所缺条件，不强行凑数。
+
+8. 以平台回读为准
+分批补测并更新、回读华佗报告，确认目标代码实际变为已覆盖。“点击成功”不等于“覆盖已回收”。未获授权，不重跑流水线或推进 Bits 阶段。
+
+9. 达标即停止
+默认达到华佗门禁要求即停止；没有明确阈值时，以超过 90% 为目标。开始时已达标则直接告知，不额外补测。发现异常时，第 5 条优先于覆盖率目标。
+
+10. 收尾与汇报
+恢复临时数据和浏览器设置，取消未提交草稿，关闭本次创建的临时标签页，保留我的原有标签页。汇报覆盖率前后变化、新增覆盖场景、功能验证结果、未覆盖项及原因、数据恢复情况和华佗报告链接。
+
+除目标信息无法确定、缺少必要权限或测试数据、发现异常及需要高风险操作授权外，连续执行，不逐步要求我确认。`;
+}
+
 export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAgentPanelProps) {
   const paseo = usePaseo();
   const workspaceDirectory = useWorkspace(workspaceId, ({ directory }) => directory);
@@ -177,6 +223,8 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
   const [sendingMainSyncPrompt, setSendingMainSyncPrompt] = useState(false);
   const [sendingMrSyncPrompt, setSendingMrSyncPrompt] = useState(false);
   const [sendingBitsPipelinePrompt, setSendingBitsPipelinePrompt] = useState(false);
+  const [creatingHuatuoCoverageAgent, setCreatingHuatuoCoverageAgent] = useState(false);
+  const huatuoCoverageCreationInFlight = useRef(false);
   const [creatingPushAgent, setCreatingPushAgent] = useState(false);
   const [creatingReviewManagerAgent, setCreatingReviewManagerAgent] = useState(false);
   const [creatingTestSubmissionAgent, setCreatingTestSubmissionAgent] = useState(false);
@@ -470,6 +518,40 @@ export function ShortcutPanel({ theme, layout, agentId, workspaceId }: PluginAge
     } finally {
       testSubmissionCreationInFlight.current = false;
       setCreatingTestSubmissionAgent(false);
+    }
+  }
+
+  async function handleCreateHuatuoCoverageAgent() {
+    const targetMrUrl = mrUrl.trim();
+    if (
+      branchLoading ||
+      !targetMrUrl ||
+      targetMrUrl === DEFAULT_MR_URL ||
+      huatuoCoverageCreationInFlight.current
+    ) {
+      return;
+    }
+
+    huatuoCoverageCreationInFlight.current = true;
+    setCreatingHuatuoCoverageAgent(true);
+    setToast(null);
+    try {
+      await paseo.workspaces.ref(workspaceId).agents.create({
+        config: {
+          provider: "codex/gpt-6-astra",
+          modeId: "full-access",
+          thinkingOptionId: "high",
+        },
+        title: "提高华佗测试覆盖率",
+        labels: { shortcut: "huatuo-coverage" },
+        prompt: buildHuatuoCoveragePrompt(targetMrUrl),
+      });
+      setToast({ message: "已创建提高华佗测试覆盖率 Agent", variant: "success" });
+    } catch (cause) {
+      setToast({ message: errorMessage(cause), variant: "error" });
+    } finally {
+      huatuoCoverageCreationInFlight.current = false;
+      setCreatingHuatuoCoverageAgent(false);
     }
   }
 
@@ -913,6 +995,16 @@ MR 链接：${JSON.stringify(targetMrUrl)}
         loading={creatingTestSubmissionAgent}
         loadingLabel="正在创建 Agent…"
         onPress={() => void handleCreateTestSubmissionAgent()}
+        style={styles.commandButton}
+        theme={theme}
+      />
+      <Button
+        accessibilityLabel="创建 Agent 提高华佗测试覆盖率"
+        disabled={branchLoading || !mrUrl.trim() || mrUrl.trim() === DEFAULT_MR_URL}
+        label="提高华佗测试覆盖率"
+        loading={creatingHuatuoCoverageAgent}
+        loadingLabel="正在创建 Agent…"
+        onPress={() => void handleCreateHuatuoCoverageAgent()}
         style={styles.commandButton}
         theme={theme}
       />

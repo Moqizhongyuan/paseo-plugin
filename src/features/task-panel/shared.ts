@@ -11,7 +11,7 @@ export const executionAgentConfig = z.object({
 });
 
 const beadsTaskListInput = z.object({
-  directory: z.string().trim().min(1).max(4096),
+  agentId: z.string().uuid(),
 });
 
 const dependency = z.object({
@@ -31,6 +31,8 @@ export const beadsTask = z.object({
 });
 
 export const beadsTaskList = z.object({
+  mainAgentId: z.string().uuid().nullable(),
+  beadsDirectory: z.string().nullable(),
   beadsAvailable: z.boolean(),
   tasks: z.array(beadsTask),
   lastError: z.string().max(2000).nullable(),
